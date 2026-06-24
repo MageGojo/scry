@@ -29,8 +29,8 @@ scry_ext_api = { path = "crates/scry_ext_api" }
 scry_ext_host = { path = "crates/scry_ext_host" }
 scry_crawl = { path = "crates/scry_crawl" }
 
-# UI:复用同级 mage-ui 组件库(它再 path 依赖自带的 vendor gpui)
-mage_ui = { path = "../mage-ui/crates/mage_ui" }
+# UI:复用 mage-ui 组件库(git 依赖,干净 clone 即可编译;mage-ui 内部已 git 依赖官方 gpui)
+mage_ui = { git = "https://github.com/MageGojo/mage-ui", rev = "3b35b91" }
 
 # 浏览器驱动站点爬虫(drission:DrissionPage 式 Rust CDP 浏览器自动化,默认 cdp 后端驱动
 # 真实 Chrome → 渲染执行 JS,绕开协议级爬虫的加密参数 / 签名逆向)。默认 feature 即 cdp。
