@@ -1,0 +1,11 @@
+[package]
+name = "scry_ext_api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# 扩展系统契约层:纯类型 + trait,无 IO。被 scry_proxy(挂钩子)与 scry_app(实现 Registry)共用。
+[dependencies]
+scry_core = { workspace = true }
+serde = { workspace = true }

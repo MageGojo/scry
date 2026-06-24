@@ -1,0 +1,14 @@
+[package]
+name = "scry_analyze"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 分析层:HttpFlow 参数/Cookie/摘要提取 + 过滤搜索 + 导出 curl(纯函数)"
+
+[dependencies]
+scry_core = { workspace = true }
+scry_decode = { workspace = true }
+
+[dev-dependencies]
+# 仅测试:验证全文搜索能解 gzip body
+flate2 = { workspace = true }

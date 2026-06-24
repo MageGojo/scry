@@ -1,0 +1,46 @@
+[package]
+name = "scry_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 界面:复用 mage_ui(gpui)的 Burp 式三栏工作台"
+
+[dependencies]
+mage_ui = { workspace = true }
+scry_core = { workspace = true }
+scry_storage = { workspace = true }
+scry_analyze = { workspace = true }
+scry_proxy = { workspace = true }
+scry_ca = { workspace = true }
+scry_sniff = { workspace = true }
+scry_decode = { workspace = true }
+scry_scan = { workspace = true }
+scry_sqli = { workspace = true }
+scry_xss = { workspace = true }
+scry_seq = { workspace = true }
+scry_codec = { workspace = true }
+scry_diff = { workspace = true }
+scry_ext_api = { workspace = true }
+scry_ext_host = { workspace = true }
+scry_crawl = { workspace = true }
+# 浏览器驱动站点爬虫:用 drission(CDP)真实 Chrome 渲染抓取(默认 cdp 后端)。
+drission = { workspace = true }
+# Repeater 重放是 async(replay::send),UI 侧需要一个 tokio runtime 来驱动它。
+tokio = { workspace = true }
+# 证书一键安装等外部命令的错误处理。
+anyhow = { workspace = true }
+# 统一 rustls 默认 CryptoProvider 为 ring:drission/reqwest 带入了 aws-lc-rs 后端,与 scry 的 ring
+# 并存使 rustls 0.23 无单一默认 provider,启动时显式装 ring 以免走默认路径的 TLS 调用 panic。
+rustls = { workspace = true }
+# 爆破:Grep-Extract 用正则从响应抽值;并发发包用 futures 的 buffer_unordered。
+regex = "1"
+futures = "0.3"
+# 拦截规则持久化(scope + Match & Replace 存盘 → 重启后自动加载生效)。
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 导入 HAR/XHR 文件:解析请求 URL(scheme/host/port/path)。
+url = { workspace = true }
+
+[[bin]]
+name = "scry_app"
+path = "src/main.rs"

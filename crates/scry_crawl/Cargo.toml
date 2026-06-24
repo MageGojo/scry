@@ -1,0 +1,9 @@
+[package]
+name = "scry_crawl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 站点爬虫内核(对标 Burp Spider/Crawler):链接抽取 + URL 解析 + BFS 调度,纯函数可单测"
+
+[dependencies]
+url = { workspace = true }

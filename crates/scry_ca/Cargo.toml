@@ -1,0 +1,17 @@
+[package]
+name = "scry_ca"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 证书层:根 CA 生成/持久化 + 叶子证书动态签发(rcgen,供 TLS MITM)"
+
+[dependencies]
+rcgen = { workspace = true }
+anyhow = { workspace = true }
+# 叶子证书有效期需用当前时间计算(rcgen 的 not_before/not_after 是 time::OffsetDateTime)。
+# 放宽到 0.3 区间(原锁 =0.3.41):与 drission 依赖链(zip 8.6 需 time ≥0.3.47)共存。
+time = "0.3"
+# 解析根证书取 SubjectPublicKeyInfo(算 SPKI 指纹,供内置浏览器 SPKI 白名单);单测亦用其校验叶子 EKU/有效期。
+x509-parser = "=0.16.0"
+# 计算 SPKI 的 SHA-256(供 --ignore-certificate-errors-spki-list)。
+sha2 = { workspace = true }

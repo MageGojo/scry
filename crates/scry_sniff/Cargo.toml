@@ -1,0 +1,14 @@
+[package]
+name = "scry_sniff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 内核被动抓包(libpcap/BPF,类 Wireshark):TCP 重组 + HTTP 解析 + HTTPS SNI"
+
+[dependencies]
+scry_core = { workspace = true }
+scry_storage = { workspace = true }
+pcap = { workspace = true }
+etherparse = { workspace = true }
+httparse = { workspace = true }
+anyhow = { workspace = true }

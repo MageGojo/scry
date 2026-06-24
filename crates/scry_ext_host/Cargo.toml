@@ -1,0 +1,18 @@
+[package]
+name = "scry_ext_host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# 扩展运行时(Runner)宿主层:加载并驱动非内置扩展。**不依赖 gpui**,可独立单测。
+# - P1:外部进程(Python 等)+ stdio JSON-RPC(本 crate)。
+# - P2:WASM(wasmtime);P3:native dylib(libloading)—— 后续在此扩展。
+[dependencies]
+scry_core = { workspace = true }
+scry_ext_api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# P2:WASM 沙箱 Runner(精简 features,见 workspace Cargo.toml)。
+wasmtime = { workspace = true }

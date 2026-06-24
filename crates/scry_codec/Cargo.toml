@@ -1,0 +1,16 @@
+[package]
+name = "scry_codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 解码器内核:URL / Base64 / Hex / HTML 实体编解码 + MD5/SHA 哈希 + 智能解码(纯函数)"
+
+[dependencies]
+# 哈希(RustCrypto,纯 Rust,免 cmake;与 scry_proxy 指纹层同源)。
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+# 对称加解密(RustCrypto,纯 Rust,免 cmake):AES-128/192/256 + CBC/ECB(PKCS7)。
+aes = { workspace = true }
+cbc = { workspace = true }
+ecb = { workspace = true }

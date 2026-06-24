@@ -1,0 +1,74 @@
+# GUI.for.SingBox 插件清单条目 —— 由 install.sh 合并进
+#   ~/Library/Application Support/GUI.for.SingBox/plugins.yaml
+# 也可在 GUI「插件」页手动「添加」后照此填写触发器与配置项。
+- id: plugin-scry-capture
+  name: Scry 抓包配合
+  version: v1.0.0
+  group: Generic
+  description: 配合 Scry(MITM 抓包/渗透套件)抓任意软件。生成配置时把 TUN 流量串进 Scry 解密抓包，解密后经其上游回流、按你选中的订阅节点出网。保留全部节点，不抢系统代理。
+  tags:
+    - 抓包
+    - MITM
+    - 安全
+  type: File
+  url: ""
+  path: data/plugins/plugin-scry-capture.js
+  # 不再用 on::generate(实测会被 GUI 剔除、onGenerate 从不执行)。
+  # 改为生成 onGenerate 混入脚本写入配置「脚本操作」,由 GUI 生成配置时必定执行。
+  triggers:
+    - on::manual
+    - on::core::started
+    - on::core::stopped
+  hasUI: true
+  menus:
+    生成抓包脚本并写入配置: GenerateScript
+    查看抓包链路说明: ShowHelp
+    复制 Scry 启动命令: CopyStartCmd
+    安装根证书到系统信任: InstallCA
+  context:
+    profiles:
+      添加 Scry 抓包: addScryCapture
+    subscriptions: {}
+    rulesets: {}
+    plugins: {}
+    scheduledtasks: {}
+  configuration:
+    - title: Scry MITM 地址
+      description: Scry 的 MITM(http 代理)监听地址；sing-box 会把要抓的流量发到这里解密。
+      key: MitmAddr
+      component: Input
+      value: 127.0.0.1:8888
+    - title: 回流入站端口
+      description: 本插件新增的 mixed 入站端口 = Scry 的上游回流口。启动 Scry 时用 SCRY_UPSTREAM=socks5://127.0.0.1:此端口。
+      key: UpstreamPort
+      component: Input
+      value: "8899"
+    - title: Scry 上游协议
+      description: Scry 上游回流协议，mixed 入站 socks5/http 都支持；socks5 远程解析、无 fake-ip 问题(推荐)。仅影响提示与复制的命令。
+      key: UpstreamScheme
+      component: Input
+      value: socks5
+    - title: 同时抓国内/直连流量
+      description: 默认关闭——只抓走代理的境外流量，省噪音、避免国内证书 pinning 应用握手失败。开启则连国内直连流量一起解密抓包。
+      key: CaptureCN
+      component: Switch
+      value: false
+    - title: TUN 入站标签(高级)
+      description: 被接管流量的 TUN 入站 tag。GUI.for.SingBox 默认 tun-in，一般不用改。
+      key: TunInbound
+      component: Input
+      value: tun-in
+    - title: 内核启动时自动拉起 Scry
+      description: 可选。开启后内核启动会自动运行下方命令并追加 --upstream；适合用 scry_proxy 命令行。用 scry_app 图形界面看流量的话请关闭、自行启动。
+      key: AutoRun
+      component: Switch
+      value: false
+    - title: Scry 命令(自动拉起用)
+      description: 仅当上面开启时生效。scry_proxy 可执行文件绝对路径，例：/Users/you/Project/scry/target/release/scry_proxy
+      key: ScryCommand
+      component: Input
+      value: ""
+  status: 0
+  disabled: false
+  install: false
+  installed: false

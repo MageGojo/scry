@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Scry 抓包用 Proxifier profile。
+  作用:按【进程】把目标流量喂给 scry(127.0.0.1:8888)抓包解密;scry 自身 + QX/Surge 等代理客户端走 Direct 防回环。
+
+  只需一个【HTTPS 类型(= CONNECT 隧道)代理】即可:scry 收到 CONNECT 后会自动判断隧道内是 TLS 还是明文——
+    - TLS  → 动态签证书做 MITM 解密(HTTPS / 443);
+    - 明文 → 当普通 HTTP 抓取(80 等)。
+  所以不用再按端口分流、也不用 HTTP 类型代理。这与 Burp / mitmproxy 的标准 Proxifier 配法一致。
+
+  导入:Proxifier → File → Import Profile… → 选本文件;然后 Load 它。
+  抓包前:在 scry 里点【开始抓包】(默认就是 MITM 代理源 127.0.0.1:8888),并安装信任根 CA(~/.scry/ca.pem)。
+  默认只代理 curl / wget 方便先验证;要抓你自己的 App,把它的进程名加到下面 "Target → Scry" 规则的 Applications。
+  详见同目录 README.md。
+-->
+<ProxifierProfile version="101" platform="MacOSX" product_id="2" product_minver="200">
+    <Options>
+        <Resolve>
+            <!-- 强制【通过代理解析域名】:保证 scry 收到真实 hostname(用于签叶子证书 + 上游 SNI),
+                 而不是被 Proxifier 本地解析成 IP(那样 HTTPS 上游握手会因 SNI=IP 失败)。 -->
+            <AutoModeDetection enabled="false"/>
+            <ViaProxy enabled="true">
+                <TryLocalDnsFirst enabled="false"/>
+            </ViaProxy>
+            <ExclusionList ExcludeSimpleHostnames="true" ExcludeLocalhost="true" ExcludeSelfHostname="true" ExcludeLocalDomain="true">localhost;%SimpleHostnames%;%ComputerName%;*.local;</ExclusionList>
+        </Resolve>
+        <Encryption mode="basic"/>
+        <HttpProxiesSupport enabled="false"/>
+        <HandleDirectConnections enabled="false"/>
+        <ConnectionLoopDetection enabled="true"/>
+        <ProcessServices enabled="false"/>
+        <ProcessOtherUsers enabled="false"/>
+    </Options>
+    <ProxyList>
+        <!-- scry:HTTPS 类型 = CONNECT 隧道代理。HTTP 与 HTTPS 流量统一走 CONNECT,scry 自动区分解密/明文。 -->
+        <Proxy id="100" type="HTTPS">
+            <Address>127.0.0.1</Address>
+            <Port>8888</Port>
+            <Options>0</Options>
+        </Proxy>
+    </ProxyList>
+    <ChainList/>
+    <RuleList>
+        <!-- 1) 回环 / 本机直连:绝不能把发往 127.0.0.1 的连接再代理回去 -->
+        <Rule enabled="true">
+            <Name>Localhost direct</Name>
+            <Targets>localhost; 127.0.0.1; ::1; %ComputerName%</Targets>
+            <Action type="Direct"/>
+        </Rule>
+        <!-- 2) 防回环兜底:scry 自身 + 代理客户端一律 Direct。
+                scry 解密后发往真实服务器的【上游连接】来自 scry_app/scry_proxy 进程,若被再代理回 scry 就死循环;
+                QX/Surge 等客户端进程也 Direct。本 profile 默认 Default=Direct,这些进程本就 Direct;
+                此规则用于你把 Default 改成 Proxy(想抓全机)时仍安全。 -->
+        <Rule enabled="true">
+            <Name>Bypass scry and proxy clients (anti-loop)</Name>
+            <Applications>scry_app; scry_proxy; scry; scry*; Proxifier; Quantumult X; Quantumult X Tunnel; Quantumult X Launch Helper; Quantumult*; Surge; Surge*; surge*; ClashX; ClashX Pro; Clash*; clash*; mihomo; sing-box; Stash; Loon; V2Ray; v2ray*; Qv2ray; Shadowrocket; ss-local; ssr-local; trojan; Outline; mitmproxy; mitmdump; privoxy</Applications>
+            <Action type="Direct"/>
+        </Rule>
+        <!-- 3) 目标进程 → 喂给 scry(任意端口,统一走 CONNECT;HTTP/HTTPS 都行)。
+                想抓自己的 App:把进程名加到这里(空格原样写、用 ; 分隔、支持 * 通配、别加引号)。
+                注意:浏览器对 Google/大厂域名做了证书 pinning,任何 MITM 都解不开(连接会秒断、页面打不开),属正常;
+                      验证解密请用非 pinning 站点(如 curl https://example.com)。 -->
+        <Rule enabled="true">
+            <Name>Target to Scry</Name>
+            <Applications>curl; wget; Google Chrome*</Applications>
+            <Action type="Proxy">100</Action>
+        </Rule>
+        <!-- 4) 其它一切:Direct(不打扰系统其余流量,QX 照常工作)。
+                想"抓全机"可把本条 Action 改成 Proxy 100(注意上面的防回环规则已保护 scry/QX)。 -->
+        <Rule enabled="true">
+            <Name>Default</Name>
+            <Action type="Direct"/>
+        </Rule>
+    </RuleList>
+</ProxifierProfile>

@@ -1,0 +1,25 @@
+[package]
+name = "scry_mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# MCP 服务二进制(stdio JSON-RPC):让 AI 调度 scry 的引擎能力。
+[[bin]]
+name = "scry-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# 复用同一套内核(与 GUI 同源):类型 / 存储 / 重放 / 扫描 / 越权 / 编解码 / 解码展示。
+scry_core.workspace = true
+scry_storage.workspace = true
+scry_proxy.workspace = true
+scry_scan.workspace = true
+scry_codec.workspace = true
+scry_decode.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+# replay::send 是 async,用一个运行时 block_on 驱动每个发包工具。
+tokio.workspace = true

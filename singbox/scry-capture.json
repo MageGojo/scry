@@ -1,0 +1,61 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "airport" },
+      { "type": "udp", "tag": "local", "server": "223.5.5.5", "detour": "direct" }
+    ],
+    "rules": [
+      { "rule_set": "geosite-cn", "server": "local" }
+    ],
+    "final": "remote"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30"],
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "system"
+    },
+    {
+      "type": "mixed",
+      "tag": "scry-upstream-in",
+      "listen": "127.0.0.1",
+      "listen_port": 8899
+    }
+  ],
+  "outbounds": [
+    { "type": "http", "tag": "scry", "server": "127.0.0.1", "server_port": 8888 },
+    {
+      "type": "shadowsocks",
+      "tag": "airport",
+      "server": "REPLACE_WITH_YOUR_AIRPORT_SERVER",
+      "server_port": 443,
+      "method": "aes-256-gcm",
+      "password": "REPLACE_WITH_YOUR_PASSWORD"
+    },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "inbound": ["scry-upstream-in"], "outbound": "airport" },
+      { "ip_is_private": true, "outbound": "direct" },
+      { "inbound": ["tun-in"], "outbound": "scry" }
+    ],
+    "rule_set": [
+      {
+        "tag": "geosite-cn",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+        "download_detour": "airport"
+      }
+    ],
+    "final": "airport"
+  }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "scry_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 共享类型:HttpFlow / 头部 / 去重指纹(无 IO)"
+
+[dependencies]
+serde = { workspace = true }
+sha1 = { workspace = true }

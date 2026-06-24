@@ -1,0 +1,108 @@
+# Scry —— 纯 Rust 内核 + mage_ui(gpui) 界面的 Burp 式安全渗透套件
+# 优先 macOS;不内置进程劫持,配合 Proxifier 把目标进程流量路由进本代理。
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Scry"]
+
+[workspace.dependencies]
+# 内部 crate
+scry_core = { path = "crates/scry_core" }
+scry_ca = { path = "crates/scry_ca" }
+scry_storage = { path = "crates/scry_storage" }
+scry_proxy = { path = "crates/scry_proxy" }
+scry_decode = { path = "crates/scry_decode" }
+scry_analyze = { path = "crates/scry_analyze" }
+scry_sniff = { path = "crates/scry_sniff" }
+scry_scan = { path = "crates/scry_scan" }
+scry_sqli = { path = "crates/scry_sqli" }
+scry_xss = { path = "crates/scry_xss" }
+scry_seq = { path = "crates/scry_seq" }
+scry_codec = { path = "crates/scry_codec" }
+scry_diff = { path = "crates/scry_diff" }
+scry_ext_api = { path = "crates/scry_ext_api" }
+scry_ext_host = { path = "crates/scry_ext_host" }
+scry_crawl = { path = "crates/scry_crawl" }
+
+# UI:复用同级 mage-ui 组件库(它再 path 依赖自带的 vendor gpui)
+mage_ui = { path = "../mage-ui/crates/mage_ui" }
+
+# 浏览器驱动站点爬虫(drission:DrissionPage 式 Rust CDP 浏览器自动化,默认 cdp 后端驱动
+# 真实 Chrome → 渲染执行 JS,绕开协议级爬虫的加密参数 / 签名逆向)。默认 feature 即 cdp。
+drission = { git = "https://github.com/MageGojo/drission-rs", rev = "15120f3" }
+
+# 运行时 / 网络
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+bytes = "1"
+httparse = "1"
+# URL 解析(scry_crawl 站点爬虫等用;补齐 workspace 声明以解阻塞)。
+url = "2"
+
+# 平台能力(透明抓包:/dev/pf ioctl + geteuid;仅 macOS 用)
+libc = "0.2"
+
+# 内核被动抓包(libpcap/BPF + 以太网/IP/TCP 解析)
+pcap = "2"
+etherparse = "0.16"
+
+# TLS / 证书(锁 0.13.2:signed_by 取 &Certificate;ring 后端免 aws-lc 的 cmake 构建)
+rcgen = { version = "=0.13.2", default-features = false, features = ["pem", "ring", "x509-parser"] }
+# TLS MITM(统一用 ring 后端,与 rcgen 一致,免 aws-lc 的 cmake)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# 存储
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 解压(展示层按 Content-Encoding 解码;均为纯 Rust,免系统依赖)
+flate2 = "1"
+brotli = "7"
+# 字符集解码(GBK/Big5/Shift_JIS… → UTF-8;Firefox 同款)
+encoding_rs = "0.8"
+
+# 序列化 / 工具
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+# TLS 指纹哈希(纯 Rust,RustCrypto;免 cmake):JA3 用 MD5,JA4 用 SHA-256。
+md-5 = "0.10"
+sha2 = "0.10"
+# 解码器对称加解密(RustCrypto,纯 Rust,免 cmake):AES + CBC/ECB 分组模式(PKCS7)。
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+ecb = { version = "0.1", features = ["alloc"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 扩展系统 P2:WASM 沙箱运行时(wasmtime,纯 Rust 静态链接,不破坏零环境出包)。
+# 精简 features:只保留 core module 运行(runtime)+ 即时编译(cranelift)+ 文本解析(wat,测试用 WAT 内联)。
+# 砍掉 component-model / async / cache / parallel-compilation / pooling-allocator 等重头,减体积与编译时间。
+wasmtime = { version = "46", default-features = false, features = ["std", "runtime", "cranelift", "wat"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# 注意:不要 panic="abort"(gpui / mutex 依赖 unwind)
+
+# 开发期运行流畅(关键):把**所有依赖**(gpui / flate2 / brotli / serde_json / rusqlite …)
+# 编进 O3,而本仓库 crate 仍 opt-level=0 保持快速增量 + 可调试。
+# 效果:`cargo run`(debug)下,gzip 解压 / JSON 解析 / gpui 渲染等重活按优化速度跑,
+# 抓包面板大响应体不再因 debug 未优化而卡。首次构建会因依赖重编而变慢(一次性)。
+[profile.dev.package."*"]
+opt-level = 3
+
+# scry_app 自身(UI 渲染热路径:每帧建大量元素)在 dev 下也开 O2,滚动/重绘冲 120 帧。
+# 代价:scry_app 增量编译略慢(但仍可调试),换取流畅度;其余本仓库 crate 仍默认 0 级。
+[profile.dev.package.scry_app]
+opt-level = 2

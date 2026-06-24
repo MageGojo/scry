@@ -1,0 +1,12 @@
+[package]
+name = "scry_decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 解码层:按 Content-Encoding 解压响应体(gzip/deflate/br)+ 文本/JSON 展示辅助"
+
+[dependencies]
+flate2 = { workspace = true }
+brotli = { workspace = true }
+serde_json = { workspace = true }
+encoding_rs = { workspace = true }

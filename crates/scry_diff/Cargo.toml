@@ -1,0 +1,8 @@
+[package]
+name = "scry_diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry 比较器内核:LCS 行 / 词 / 字符级 diff + 相似度(纯函数)"
+
+[dependencies]

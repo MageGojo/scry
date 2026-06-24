@@ -1,0 +1,15 @@
+[package]
+name = "scry_xss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+scry_core = { workspace = true }
+scry_analyze = { workspace = true }
+
+[dev-dependencies]
+# 端到端冒烟:用真实 replay::send 打一个本地模拟反射站点,验证整条 XSS 链路。
+scry_proxy = { workspace = true }
+tokio = { workspace = true }

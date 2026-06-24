@@ -1,0 +1,4 @@
+{
+  "command": ["python3", "main.py"],
+  "timeout_ms": 1500
+}

@@ -1,0 +1,4 @@
+{
+  "wasm": "wasm_demo.wasm",
+  "fuel": 200000000
+}
