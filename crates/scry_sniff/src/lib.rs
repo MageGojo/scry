@@ -63,11 +63,54 @@ struct ConnKey {
     s_port: u16,
 }
 
+/// Windows 零环境关键:被动嗅探依赖 Npcap 的 `wpcap.dll`(构建时已设为 `/DELAYLOAD` 延迟加载,
+/// 没装 Npcap 也能双击启动 app)。这里在调用**任何** pcap 函数前先探测 `wpcap.dll` 能否加载,
+/// 缺失则返回带指引的错误,避免延迟加载失败触发进程崩溃。非 Windows 平台为 no-op。
+#[cfg(windows)]
+fn ensure_capture_backend() -> Result<()> {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryW(name: *const u16) -> *mut c_void;
+        fn FreeLibrary(h: *mut c_void) -> i32;
+    }
+    let wide: Vec<u16> = OsStr::new("wpcap.dll")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: 标准 Win32 调用,传入合法的 NUL 结尾宽字符串;成功拿到句柄后立即释放。
+    let present = unsafe {
+        let h = LoadLibraryW(wide.as_ptr());
+        if h.is_null() {
+            false
+        } else {
+            FreeLibrary(h);
+            true
+        }
+    };
+    if present {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "未检测到 Npcap(wpcap.dll)。被动嗅探需要安装 Npcap 运行时:https://npcap.com 。\
+             MITM 代理 / 扫描 / 重放等核心功能无需 Npcap。"
+        )
+    }
+}
+
+/// 非 Windows:抓包后端随系统 libpcap,始终可用。
+#[cfg(not(windows))]
+fn ensure_capture_backend() -> Result<()> {
+    Ok(())
+}
+
 /// 默认网卡名(供 UI 显示 / 传参)。
 ///
 /// **优先「默认路由网卡」**——挂 VPN / Shadowrocket / Quantumult X 等 TUN 代理时,真正过流量的是
 /// `utunN`(默认路由指向它),而非 pcap `lookup()` 返回的 `en0`。先按路由表选,失败再退回 pcap。
 pub fn default_device() -> Result<String> {
+    ensure_capture_backend()?;
     if let Some(rt) = default_route_iface() {
         return Ok(rt);
     }
@@ -79,6 +122,7 @@ pub fn default_device() -> Result<String> {
 
 /// 枚举所有可选网卡名(供设置页下拉)。**默认路由网卡置顶**(它才是真正过流量的那张)。
 pub fn list_devices() -> Result<Vec<String>> {
+    ensure_capture_backend()?;
     let mut names: Vec<String> = Device::list()
         .context("枚举网卡失败")?
         .into_iter()
@@ -126,6 +170,7 @@ fn default_route_iface() -> Option<String> {
 
 /// 快速校验是否能打开 BPF 抓包(权限 / 设备可用)。打不开时返回带指引的错误。
 pub fn check_available() -> Result<()> {
+    ensure_capture_backend()?;
     let dev = Device::lookup()
         .context("查找默认网卡失败")?
         .context("没有可用网卡")?;
@@ -148,6 +193,7 @@ pub fn run(
     stop: Arc<AtomicBool>,
     pcapng_out: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    ensure_capture_backend()?;
     let dev = match iface {
         Some(name) => Device::list()
             .context("枚举网卡失败")?
