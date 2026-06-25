@@ -19,7 +19,8 @@ $BinName = "scry_app"
 $AppName = "Scry"
 $Dist    = Join-Path $Root "dist"
 $OutDir  = Join-Path $Dist "$AppName-win"
-$IconsSrc = Join-Path $Root "..\mage-ui\crates\mage_ui\assets\icons"
+# UI 图标随 scry 一起 vendored 在 assets\icons(自包含,不依赖同级 mage-ui 目录,CI 上也有)。
+$IconsSrc = Join-Path $Root "assets\icons"
 
 Write-Host "==> [1/5] 编译 release(opt-level=z + lto,首次很慢)"
 Push-Location $Root

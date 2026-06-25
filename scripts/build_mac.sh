@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ICONS_SRC="$ROOT/../mage-ui/crates/mage_ui/assets/icons"
+ICONS_SRC="$ROOT/assets/icons"   # UI 图标 vendored 在 scry 内,自包含(不依赖同级 mage-ui)
 APP_ICNS="$ROOT/assets/icon/AppIcon.icns"   # 应用图标(Dock/Finder),由 scripts/make_icon.py 从 assets/icon/scry.png 生成
 BIN_NAME="scry_app"
 APP_NAME="Scry"
