@@ -146,6 +146,8 @@ impl ScryApp {
             include_subdomains: true,
         };
         let upstream = self.upstream_proxy(cx);
+        // 记下主 host(种子 host),供「爬完自动审计」把扫描范围限到爬过的站。
+        self.crawl_audit_host = seeds.first().and_then(|s| bare_host(s));
         self.crawl_busy = true;
         self.crawl_visited.clear();
         self.crawl_progress = Some(format!("0 / {}", self.crawl_pages));
@@ -198,7 +200,7 @@ impl ScryApp {
                     .timer(Duration::from_millis(150))
                     .await;
                 let keep_going = this.update(cx, |this, cx| {
-                    this.drain_crawl_results();
+                    this.drain_crawl_results(cx);
                     cx.notify();
                     this.crawl_busy
                 });
@@ -228,7 +230,7 @@ impl ScryApp {
     }
 
     /// 把通道里已到的访问结果并入「本次发现列表」(表头)、刷新进度;结束则收尾 + 关浏览器。
-    fn drain_crawl_results(&mut self) {
+    fn drain_crawl_results(&mut self, cx: &mut Context<Self>) {
         let Some(rx) = &self.crawl_rx else {
             return;
         };
@@ -274,7 +276,41 @@ impl ScryApp {
                 "crawl",
                 format!("站点爬虫完成 · 抓取 {fetched} 页 · 发现 {discovered} 个 URL"),
             );
+            // Crawl → Audit:爬完(且抓到了页)自动把流量喂给扫描器(被动 + 主动)。
+            if self.crawl_then_audit && fetched > 0 {
+                self.start_crawl_audit(cx);
+            }
         }
+    }
+
+    /// 切换「爬完自动审计」开关。
+    pub fn toggle_crawl_audit(&mut self, cx: &mut Context<Self>) {
+        self.crawl_then_audit = !self.crawl_then_audit;
+        cx.notify();
+    }
+
+    /// Crawl → Audit 流水线:把扫描范围限到爬过的 host,跳到扫描器并跑被动 + 主动扫描。
+    ///
+    /// 爬虫流量已经过 MITM 落进历史(`self.flows`),这里只是把它们喂给现成的扫描引擎,
+    /// 实现「爬 → 审」一键闭环(对标 Burp 的 crawl + audit)。
+    fn start_crawl_audit(&mut self, cx: &mut Context<Self>) {
+        // 若主 host 在抓到的流量里,就把扫描限定到它;否则扫全部(范围最稳)。
+        self.scan_target = match &self.crawl_audit_host {
+            Some(h) if self.scan_hosts().iter().any(|x| x == h) => Some(h.clone()),
+            _ => None,
+        };
+        self.tab = crate::state::Tab::Scanner;
+        self.push_log(
+            LogLevel::Info,
+            "crawl",
+            format!(
+                "Crawl → Audit:对爬过的站启动审计({})",
+                self.crawl_audit_host.as_deref().unwrap_or("全部")
+            ),
+        );
+        // 被动扫描(同步,即时出结果)+ 主动扫描(后台 replay,自带进度/可停止)。
+        self.run_passive_scan(cx);
+        self.run_active_scan(cx);
     }
 
     /// 进度文案(`抓取 X · 发现 Y`)。
@@ -471,6 +507,13 @@ fn host_of(url: &str) -> Option<String> {
     (!authority.is_empty()).then(|| authority.to_string())
 }
 
+/// 取 URL 的**裸 host**(去端口),用于匹配抓到的流量 `host`(流量里 host 不含端口)。
+fn bare_host(url: &str) -> Option<String> {
+    let authority = host_of(url)?;
+    let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(&authority);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// 构造一条"结束"消息。
 fn done_msg(fetched: usize, discovered: usize) -> CrawlMsg {
     CrawlMsg {
@@ -532,5 +575,12 @@ mod tests {
         );
         assert_eq!(host_of("https://example.com:443/x").as_deref(), Some("example.com:443"));
         assert_eq!(host_of("not a url"), None);
+    }
+
+    #[test]
+    fn bare_host_strips_port() {
+        assert_eq!(bare_host("https://example.com/x").as_deref(), Some("example.com"));
+        assert_eq!(bare_host("http://h:8080/p").as_deref(), Some("h"));
+        assert_eq!(bare_host("nope"), None);
     }
 }

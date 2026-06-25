@@ -16,6 +16,7 @@ scry_core = { path = "crates/scry_core" }
 scry_ca = { path = "crates/scry_ca" }
 scry_storage = { path = "crates/scry_storage" }
 scry_proxy = { path = "crates/scry_proxy" }
+scry_quic = { path = "crates/scry_quic" }
 scry_decode = { path = "crates/scry_decode" }
 scry_analyze = { path = "crates/scry_analyze" }
 scry_sniff = { path = "crates/scry_sniff" }
@@ -28,6 +29,12 @@ scry_diff = { path = "crates/scry_diff" }
 scry_ext_api = { path = "crates/scry_ext_api" }
 scry_ext_host = { path = "crates/scry_ext_host" }
 scry_crawl = { path = "crates/scry_crawl" }
+scry_oob = { path = "crates/scry_oob" }
+scry_nuclei = { path = "crates/scry_nuclei" }
+scry_session = { path = "crates/scry_session" }
+scry_httpql = { path = "crates/scry_httpql" }
+scry_jwt = { path = "crates/scry_jwt" }
+scry_graphql = { path = "crates/scry_graphql" }
 
 # UI:复用 mage-ui 组件库(git 依赖,干净 clone 即可编译;mage-ui 内部已 git 依赖官方 gpui)
 mage_ui = { git = "https://github.com/MageGojo/mage-ui", rev = "3b35b91" }
@@ -70,6 +77,10 @@ encoding_rs = "0.8"
 # 序列化 / 工具
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML 解析(nuclei 模板引擎 scry_nuclei):纯 Rust(unsafe-libyaml 移植版,免 cmake / C 工具链)。
+serde_yaml = "0.9"
+# 正则(nuclei regex matcher/extractor + Intruder grep-extract):纯 Rust。
+regex = "1"
 sha1 = "0.10"
 # TLS 指纹哈希(纯 Rust,RustCrypto;免 cmake):JA3 用 MD5,JA4 用 SHA-256。
 md-5 = "0.10"
@@ -78,6 +89,9 @@ sha2 = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 ecb = { version = "0.1", features = ["alloc"] }
+# QUIC(HTTP/3)Initial 包解密:AES-128-GCM(载荷)+ AES-ECB(头保护采样);纯 Rust。
+# 精简 features(只要 aes + alloc,免 getrandom/rand 等运行时随机源,解密用不到)。
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

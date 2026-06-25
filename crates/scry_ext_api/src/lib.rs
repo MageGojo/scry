@@ -269,6 +269,14 @@ pub trait ExtensionHost: Send + Sync {
     fn wants_response_hook(&self) -> bool {
         false
     }
+
+    /// Map Remote:在**连接上游之前**询问是否把目标 `host:port` 重定向到别处。
+    ///
+    /// 返回 `Some((新 host, 新 port))` 则代理连到新目标(HTTPS 下叶子证书仍按**原** host 签发,
+    /// 客户端无感知);`None` = 不重定向。默认不重定向。
+    fn remap_target(&self, _host: &str, _port: u16) -> Option<(String, u16)> {
+        None
+    }
 }
 
 #[cfg(test)]

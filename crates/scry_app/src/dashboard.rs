@@ -1,12 +1,11 @@
 //! 仪表盘(Dashboard)—— 以「**抓什么**」组织,scry 自管流量源(对标 Burp,不抢系统代理)。
 //!
-//! 抓包内核唯一:**MITM 代理**(TLS 终止式,解密 + 改包)。仪表盘按「抓包目标」给四张卡:
+//! 抓包内核唯一:**MITM 代理**(TLS 终止式,解密 + 改包)。仪表盘按「抓包目标」给几张卡:
 //! - **T1 抓网站(内置浏览器)** ⭐ 默认零配置:scry 拉起 Chromium,喂代理 + CA SPKI + 独立 profile。
-//! - **T2 抓程序 / 命令**:托管启动任意程序,注入代理 + CA env。
-//! - **T4 对接代理客户端**(sing-box / QX / Proxifier):抓「已运行的任意软件」,进阶。
+//! - **对接 Proxifier**:按进程把已运行软件的流量强制喂进 MITM 内核(进阶)。
 //! - **抓整机(被动嗅探)**:任意软件但仅元数据 + SNI(辅助降级,不解密),可另存 pcapng。
 //!
-//! 前三者都汇聚到同一个 MITM 内核(`capture_mode = Proxy`);嗅探走 `Kernel`(辅助)。
+//! 前两者都汇聚到同一个 MITM 内核(`capture_mode = Proxy`);嗅探走 `Kernel`(辅助)。
 
 use mage_ui::prelude::*;
 
@@ -125,12 +124,26 @@ impl ScryApp {
             .size(ButtonSize::Sm)
             .icon(IconName::Download)
             .on_click(cx.listener(|this, _e, _w, cx| this.import_har_dialog(cx)));
+        // 导出当前会话流量为 HAR。
+        let export_btn = Button::new("dash-export-top", l.t("Export HAR"))
+            .ghost()
+            .size(ButtonSize::Sm)
+            .icon(IconName::Package)
+            .on_click(cx.listener(|this, _e, _w, cx| this.export_har_dialog(cx)));
+        // 导出渗透报告(聚合扫描器 / 越权 / Nuclei / XSS / SQLi 的 finding → HTML+Markdown)。
+        let report_btn = Button::new("dash-report-top", l.t("Export report"))
+            .ghost()
+            .size(ButtonSize::Sm)
+            .icon(IconName::Folder)
+            .on_click(cx.listener(|this, _e, _w, cx| this.export_report_dialog(cx)));
         header = header.child(
             div()
                 .flex()
                 .items_center()
                 .gap(t.space.md)
                 .child(import_btn)
+                .child(export_btn)
+                .child(report_btn)
                 .child(status_pill),
         );
 
@@ -186,7 +199,6 @@ impl ScryApp {
                     .child(metrics)
                     .child(section_label(l.t("Decrypting capture (MITM core)"), c, t))
                     .child(self.card_browser(proxy_running, cx))
-                    .child(self.card_program(proxy_running, cx))
                     .child(self.card_client(proxy_running, cx))
                     .child(section_label(l.t("Passive (auxiliary · metadata only)"), c, t))
                     .child(self.card_sniff(sniff_running, cx))
@@ -240,41 +252,48 @@ impl ScryApp {
                             ),
                     )
                     .into_any_element()
-            } else {
+            } else if crate::launcher::find_browser().is_some() {
+                // 有可用浏览器(内置 / 已下载 / 系统)→ 直接启动。
                 Button::new("dash-launch-browser", l.t("Launch browser capture"))
                     .variant(ButtonVariant::Primary)
                     .icon(IconName::Globe)
                     .on_click(cx.listener(|this, _e, _w, cx| this.launch_browser_capture(cx)))
                     .into_any_element()
+            } else if self.chromium_downloading {
+                // 正在下载内置浏览器。
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.sm)
+                    .child(StatusDot::new(c.warning))
+                    .child(
+                        div()
+                            .text_size(t.font_size.sm)
+                            .text_color(c.warning)
+                            .child(l.t("Downloading built-in browser…")),
+                    )
+                    .into_any_element()
+            } else {
+                // 目标机没装 Chrome:提供一键下载内置浏览器(零环境)。
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(t.space.sm)
+                    .child(HintRow::new(
+                        IconName::Globe,
+                        l.t("No Chrome/Chromium found — download a built-in one for one-click capture"),
+                    ))
+                    .child(
+                        Button::new("dash-download-chromium", l.t("Download built-in browser (~150MB)"))
+                            .variant(ButtonVariant::Primary)
+                            .icon(IconName::Download)
+                            .on_click(cx.listener(|this, _e, _w, cx| this.download_chromium(cx))),
+                    )
+                    .into_any_element()
             })
     }
 
-    /// T2 · 抓程序 / 命令(托管启动)。
-    fn card_program(&self, running: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = cx.theme().colors;
-        let t = cx.theme().tokens;
-        let l = self.lang;
-        target_card(running, c, t)
-            .child(card_header(
-                IconName::Package,
-                l.t("Capture a program / command"),
-                l.t("Launches it with proxy + CA injected (curl, Electron, Java, Python, Node…)"),
-                vec![(l.t("Decrypt"), c.success)],
-                running,
-                l,
-                c,
-                t,
-            ))
-            .child(self.prog_input.clone())
-            .child(
-                Button::new("dash-launch-prog", l.t("Launch & capture"))
-                    .variant(ButtonVariant::Primary)
-                    .icon(IconName::Zap)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.launch_program_capture(cx))),
-            )
-    }
-
-    /// T4 · 对接代理客户端(sing-box / QX / Proxifier)。
+    /// 对接 Proxifier(按进程把已运行软件的流量喂进 MITM 内核)。
     fn card_client(&self, running: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let c = cx.theme().colors;
         let t = cx.theme().tokens;
@@ -282,16 +301,16 @@ impl ScryApp {
         target_card(running, c, t)
             .child(card_header(
                 IconName::GitBranch,
-                l.t("Connect a proxy client (sing-box / QX / Proxifier)"),
-                l.t("Capture any already-running app by routing its traffic into Scry"),
+                l.t("Connect Proxifier"),
+                l.t("Force any already-running app's traffic into Scry by process"),
                 vec![(l.t("Decrypt"), c.success), (l.t("Advanced"), c.warning)],
                 running,
                 l,
                 c,
                 t,
             ))
-            .child(HintRow::new(IconName::Globe, l.t("Point the client proxy to 127.0.0.1:8888 (sing-box: use the Scry plugin)")))
-            .child(HintRow::new(IconName::GitBranch, l.t("Set upstream to socks5://127.0.0.1:8899 in Settings so traffic exits via your nodes")))
+            .child(HintRow::new(IconName::Globe, l.t("In Proxifier, add proxy 127.0.0.1:8888 (HTTPS) + a rule sending the target app to it")))
+            .child(HintRow::new(IconName::GitBranch, l.t("Give Scry itself (and QX/sing-box) a Direct rule to avoid loops; install the CA in Settings")))
             .child(
                 div()
                     .flex()

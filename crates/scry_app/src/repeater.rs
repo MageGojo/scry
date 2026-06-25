@@ -292,6 +292,9 @@ impl ScryApp {
                         .child(self.lang.t("Edit the request on the left, then Send")),
                 )
                 .into_any_element()
+        } else if self.rp_resp_view == MsgView::Render && self.rp_err.is_none() {
+            // 渲染视图:图片直接预览(复用代理响应预览),非文本框。
+            self.response_preview(self.rp_resp.as_ref(), cx)
         } else {
             div()
                 .id("rp-resp-scroll")
@@ -311,7 +314,7 @@ impl ScryApp {
 
         // 响应区视图切换(Pretty 高亮 / Raw / Hex);有响应时才显示。
         let has_resp = self.rp_resp.is_some() && self.rp_err.is_none();
-        let rp_views = [MsgView::Pretty, MsgView::Raw, MsgView::Hex];
+        let rp_views = [MsgView::Pretty, MsgView::Raw, MsgView::Hex, MsgView::Render];
         let rv_idx = rp_views
             .iter()
             .position(|m| *m == self.rp_resp_view)

@@ -5,14 +5,16 @@
 //!   判完整)后组成 [`HttpFlow`] 落盘。
 //! - **HTTPS(:443)**:被动抓不到明文,只从 ClientHello 解出 **SNI 主机名**,记一条「加密」流,
 //!   提示切到 MITM 代理模式解密。
+//! - **HTTP/3(UDP:443,QUIC)**:抓客户端 Initial 包,用 RFC 9001 公开盐**无需密钥解密** ClientHello,
+//!   取 **SNI / ALPN**,记一条「加密」h3 流(对标 Wireshark;QUIC 无法 MITM,只可见不解明文)。
 //!
 //! 权限:打开 BPF 设备通常需要权限(`sudo chmod o+r /dev/bpf*`,或把 app 以 root 跑)。打不开时
 //! [`run`] 返回带提示的错误,调用方可引导用户授权或改用代理模式。
 //!
-//! 限制(MVP):重组按到达顺序累积(不处理乱序 / 重传 / SACK);每条连接只产**第一对**完整
-//! 请求/响应(keep-alive 后续请求暂略);close-delimited(无 CL 无 chunked)响应暂不产出。
+//! 限制(MVP):重组按到达顺序累积(不处理乱序 / 重传 / SACK);close-delimited(无 CL 无 chunked)
+//! 响应靠连接静默 / FIN 才产出;QUIC 仅解客户端 **Initial** 取 SNI/ALPN(不解 1-RTT 应用数据)。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -164,7 +166,8 @@ pub fn run(
         .timeout(200)
         .open()
         .context("打开 BPF 抓包设备失败(需要权限:sudo chmod o+r /dev/bpf*,或改用代理模式)")?;
-    let _ = cap.filter("tcp port 80 or tcp port 443", true);
+    // TCP 80/443(HTTP 重组 + HTTPS SNI)+ UDP 443(QUIC/HTTP3 Initial 取 SNI/ALPN)。
+    let _ = cap.filter("tcp port 80 or tcp port 443 or udp port 443", true);
     let linktype = cap.get_datalink();
 
     // 可选 pcapng 落盘:用抓包设备真实的 DLT(libpcap DLT 与 pcapng linktype 同值)。
@@ -187,6 +190,8 @@ pub fn run(
     });
 
     let mut conns: HashMap<ConnKey, Conn> = HashMap::new();
+    // QUIC(HTTP3,UDP)已产出的连接四元组(防 Initial 重传 / 同连接后续包重复产流)。
+    let mut quic_seen: HashSet<ConnKey> = HashSet::new();
     let mut last_sweep = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
@@ -199,8 +204,13 @@ pub fn run(
                         (ts.tv_sec as u64).wrapping_mul(1_000_000).wrapping_add(ts.tv_usec as u64);
                     let _ = w.write_packet(micros, packet.data);
                 }
-                if let Some(seg) = parse_segment(linktype, packet.data) {
-                    handle_segment(&mut conns, &store, seg);
+                if let Some((seg, is_udp)) = parse_segment(linktype, packet.data) {
+                    if is_udp {
+                        // UDP/443:QUIC(HTTP/3)被动可见性 —— 解 Initial 取 SNI/ALPN。
+                        handle_quic(&mut quic_seen, &store, seg);
+                    } else {
+                        handle_segment(&mut conns, &store, seg);
+                    }
                 }
             }
             Err(pcap::Error::TimeoutExpired) => {}
@@ -256,8 +266,9 @@ struct Segment {
     fin_or_rst: bool,
 }
 
-/// 从链路帧解出 IP + TCP + 负载(支持以太网 / BSD loopback / 裸 IP)。
-fn parse_segment(lt: Linktype, data: &[u8]) -> Option<Segment> {
+/// 从链路帧解出 IP + TCP/UDP + 负载(支持以太网 / BSD loopback / 裸 IP)。
+/// 返回 `(段, is_udp)`:`is_udp=true` 表示 UDP(QUIC/HTTP3),`false` 表示 TCP(HTTP/HTTPS)。
+fn parse_segment(lt: Linktype, data: &[u8]) -> Option<(Segment, bool)> {
     let sliced = if lt == Linktype::ETHERNET {
         SlicedPacket::from_ethernet(data).ok()?
     } else if lt == Linktype::NULL || lt == Linktype::LOOP {
@@ -288,14 +299,28 @@ fn parse_segment(lt: Linktype, data: &[u8]) -> Option<Segment> {
     };
 
     match sliced.transport? {
-        TransportSlice::Tcp(tcp) => Some(Segment {
-            src_ip,
-            dst_ip,
-            src_port: tcp.source_port(),
-            dst_port: tcp.destination_port(),
-            payload: tcp.payload().to_vec(),
-            fin_or_rst: tcp.fin() || tcp.rst(),
-        }),
+        TransportSlice::Tcp(tcp) => Some((
+            Segment {
+                src_ip,
+                dst_ip,
+                src_port: tcp.source_port(),
+                dst_port: tcp.destination_port(),
+                payload: tcp.payload().to_vec(),
+                fin_or_rst: tcp.fin() || tcp.rst(),
+            },
+            false,
+        )),
+        TransportSlice::Udp(udp) => Some((
+            Segment {
+                src_ip,
+                dst_ip,
+                src_port: udp.source_port(),
+                dst_port: udp.destination_port(),
+                payload: udp.payload().to_vec(),
+                fin_or_rst: false,
+            },
+            true,
+        )),
         _ => None,
     }
 }
@@ -385,6 +410,64 @@ fn emit_tls(conn: &Conn, store: &SharedStore, host: String) {
         vec![("X-Scry-Note".to_string(), "TLS encrypted".to_string())],
         "(TLS 加密 — 切到 MITM 代理模式可解密明文)".as_bytes().to_vec(),
         conn.started.elapsed().as_millis() as u64,
+    );
+    save(store, &flow);
+}
+
+/// QUIC(HTTP/3,UDP/443)被动可见性:对**客户端 Initial**(含 ClientHello)用 RFC 9001 公开盐
+/// 无需密钥解密,取 SNI / ALPN,每条 QUIC 连接(四元组)产一条「加密」h3 流(对标 Wireshark)。
+///
+/// 只处理**客户端 → 服务端(dst 443)**的 Initial(服务端 Initial 无客户端 SNI);短包(1-RTT 应用
+/// 数据)无握手明文,跳过。同连接的 Initial 重传 / 后续包靠 `seen` 去重,避免重复产流。
+fn handle_quic(seen: &mut HashSet<ConnKey>, store: &SharedStore, seg: Segment) {
+    if seg.dst_port != 443 || !scry_quic::is_initial(&seg.payload) {
+        return;
+    }
+    let key = ConnKey {
+        c_ip: seg.src_ip,
+        c_port: seg.src_port,
+        s_ip: seg.dst_ip,
+        s_port: seg.dst_port,
+    };
+    if seen.contains(&key) {
+        return;
+    }
+    if let Some(hello) = scry_quic::extract_handshake_info(&seg.payload) {
+        if seen.len() > 8192 {
+            seen.clear(); // 防膨胀:被动可见性,清空后至多偶尔重复一条
+        }
+        seen.insert(key);
+        emit_quic(store, &hello, seg.dst_ip);
+    }
+}
+
+/// HTTP/3(QUIC)被动流:host = SNI(无 SNI 回退服务器 IP),记一条「加密」流并标注 ALPN。
+fn emit_quic(store: &SharedStore, hello: &scry_quic::QuicHello, server_ip: IpAddr) {
+    let host = hello.sni.clone().unwrap_or_else(|| server_ip.to_string());
+    let alpn = if hello.alpn.is_empty() {
+        "h3".to_string()
+    } else {
+        hello.alpn.join(", ")
+    };
+    let note =
+        format!("(HTTP/3 QUIC 加密 — ALPN: {alpn};被动只可见 SNI/ALPN,QUIC 无法 MITM 解密明文)");
+    let flow = HttpFlow::request(
+        "CONNECT",
+        "https",
+        host.clone(),
+        443,
+        "/",
+        vec![("Host".to_string(), host)],
+        Vec::new(),
+    )
+    .with_response(
+        0,
+        vec![
+            ("X-Scry-Note".to_string(), "HTTP/3 QUIC".to_string()),
+            ("X-Scry-Alpn".to_string(), alpn),
+        ],
+        note.into_bytes(),
+        0,
     );
     save(store, &flow);
 }
@@ -818,6 +901,39 @@ mod tests {
         assert_eq!(flows[0].scheme, "https");
         assert_eq!(flows[0].host, "ab.com");
         assert_eq!(flows[0].status, 0);
+    }
+
+    #[test]
+    fn quic_udp_initial_emits_h3_flow() {
+        use std::net::Ipv4Addr;
+        let store: SharedStore = Arc::new(Mutex::new(Store::open_memory().unwrap()));
+        let mut seen = HashSet::new();
+        // 自构造含 SNI=h3.example.com / ALPN=h3 的 v1 客户端 Initial(复用 scry_quic 构造器)。
+        let pkt = scry_quic::build_test_initial(
+            &[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08],
+            "h3.example.com",
+            &["h3"],
+        );
+        let client = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2));
+        let server = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let seg = |payload: Vec<u8>| Segment {
+            src_ip: client,
+            dst_ip: server,
+            src_port: 50000,
+            dst_port: 443,
+            payload,
+            fin_or_rst: false,
+        };
+        handle_quic(&mut seen, &store, seg(pkt.clone()));
+        let flows = store.lock().unwrap().recent(10).unwrap();
+        assert_eq!(flows.len(), 1, "UDP/443 Initial 应产出一条 h3 流");
+        assert_eq!(flows[0].scheme, "https");
+        assert_eq!(flows[0].host, "h3.example.com");
+        assert_eq!(flows[0].status, 0);
+        assert_eq!(header_get(&flows[0].resp_headers, "x-scry-alpn"), Some("h3"));
+        // 同连接 Initial 重传:去重,不重复产出。
+        handle_quic(&mut seen, &store, seg(pkt));
+        assert_eq!(store.lock().unwrap().recent(10).unwrap().len(), 1, "重传不应重复产出");
     }
 
     #[test]

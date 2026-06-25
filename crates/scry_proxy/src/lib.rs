@@ -22,11 +22,21 @@ use tokio::net::{TcpListener, TcpStream};
 
 pub mod fingerprint;
 pub mod http2;
+/// HTTP 请求走私(Request Smuggling)检测(CL.TE / TE.CL 计时法)。
+pub mod smuggle;
+/// HTTP 竞态 / single-packet 攻击(最后字节同步 / 并行,对标 Burp Turbo Intruder)。
+pub mod race;
 pub mod mitm;
+// QUIC(HTTP/3)被动可见性已抽到独立轻量 crate `scry_quic`(纯算法,不背代理引擎重依赖,
+// 供 scry_sniff 复用)。此处 re-export 保留 `scry_proxy::quic::*` 路径(examples/quic_sni + 文档兼容)。
+pub use scry_quic as quic;
 pub mod replay;
+pub mod throttle;
 pub mod tls_profile;
 pub mod upstream;
 pub mod websocket;
+/// WebSocket 客户端(WS 重放 / Repeater:主动建连 + 双向收发)。
+pub mod ws_client;
 
 /// 多任务共享的存储句柄(rusqlite Connection 非 Sync,用 Mutex 包裹;落盘是短同步操作,不跨 await 持锁)。
 pub type SharedStore = Arc<Mutex<Store>>;
@@ -55,6 +65,11 @@ pub struct ProxyConfig {
     pub upstream: Option<upstream::UpstreamProxy>,
     /// 扩展钩子(on_request / on_flow_complete …);None = 无扩展。
     pub hooks: Option<ExtHooks>,
+    /// 弱网 / 限速模拟:回写客户端时注入延迟 + 带宽上限;None = 不限速(零开销)。
+    pub throttle: Option<throttle::Throttle>,
+    /// 活动 WebSocket 改帧规则;None / 空 = 帧字节透传(零行为变化)。非空时升级的 WS 连接走
+    /// 「解帧 → 文本帧按规则替换 → 重编码 → 转发」(见 [`mitm::pump_ws`])。
+    pub ws_rewrite: Option<Arc<Vec<websocket::WsRewriteRule>>>,
 }
 
 impl Default for ProxyConfig {
@@ -65,6 +80,8 @@ impl Default for ProxyConfig {
             mitm: true,
             upstream: None,
             hooks: None,
+            throttle: None,
+            ws_rewrite: None,
         }
     }
 }
@@ -278,10 +295,16 @@ async fn proxy_plain(
     }
 
     // 连接目标并发送 origin-form 请求(用钩子可能改过的请求部件;强制 Connection: close 逼上游 EOF)。
+    // Map Remote:连上游前询问是否重定向目标(明文路径上游连接在 on_request 之后,直接用重定向后的 host)。
     let started = Instant::now();
-    let mut upstream_tcp = upstream::connect_via(flow.host.as_str(), port, cfg.upstream.as_ref())
+    let (conn_host, conn_port) = cfg
+        .hooks
+        .as_ref()
+        .and_then(|h| h.0.remap_target(flow.host.as_str(), port))
+        .unwrap_or_else(|| (flow.host.clone(), port));
+    let mut upstream_tcp = upstream::connect_via(conn_host.as_str(), conn_port, cfg.upstream.as_ref())
         .await
-        .with_context(|| format!("连接目标 {}:{} 失败", flow.host, port))?;
+        .with_context(|| format!("连接目标 {conn_host}:{conn_port} 失败"))?;
     let outbound = build_origin_request(&flow.method, &flow.path, &flow.req_headers, &flow.req_body);
     upstream_tcp.write_all(&outbound).await?;
     upstream_tcp.flush().await?;
@@ -302,9 +325,8 @@ async fn proxy_plain(
         hooks.0.on_flow_complete(&flow);
     }
 
-    // 回传客户端。
-    client.write_all(&resp_bytes).await?;
-    client.flush().await?;
+    // 回传客户端(按弱网/限速档注入延迟 + 带宽上限;无档 = 直发)。
+    throttle::write_throttled(&mut client, &resp_bytes, cfg.throttle.as_ref()).await?;
     Ok(())
 }
 

@@ -165,7 +165,25 @@ impl ScryApp {
                     .child(self.lang.t("Pages")),
             )
             .child(pages_select)
-            .child(action_btn);
+            .child(action_btn)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .flex_shrink_0()
+                    .child(
+                        Switch::new("crawl-audit", self.crawl_then_audit)
+                            .disabled(self.crawl_busy)
+                            .on_toggle(cx.listener(|this, _e, _w, cx| this.toggle_crawl_audit(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(t.font_size.xs)
+                            .text_color(c.text_subtle)
+                            .child(self.lang.t("Audit after crawl")),
+                    ),
+            );
 
         if let Some(prog) = &self.crawl_progress {
             bar = bar.child(

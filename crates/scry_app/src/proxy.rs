@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use mage_ui::gpui::{ClipboardItem, MouseButton, MouseDownEvent};
+use mage_ui::gpui::{img, ClipboardItem, MouseButton, MouseDownEvent};
 use mage_ui::prelude::*;
 use scry_core::HttpFlow;
 use scry_decode::body_text;
@@ -34,24 +34,66 @@ impl ScryApp {
         let c = cx.theme().colors;
         let t = cx.theme().tokens;
 
-        let query = self.search.read(cx).text().trim().to_ascii_lowercase();
+        let raw_query = self.search.read(cx).text().trim().to_string();
+        let query = raw_query.to_ascii_lowercase();
         let proto = self.proto;
         let host_filter = self.host_filter.clone();
         let total = self.flows.len();
+        // 搜索升级为 **HTTPQL**(对标 Caido):写成 `req.method.eq:"GET" AND resp.status.gt:400`
+        // 这类带字段子句的查询 → 结构化逐字段匹配;纯文本 / 解析失败 → 回退快路径子串搜索。
+        let httpql = if raw_query.is_empty() {
+            None
+        } else {
+            scry_httpql::parse(&raw_query)
+                .ok()
+                .filter(|q| q.has_clauses())
+        };
         // 可见行下标映射(过滤后)：虚拟化表只渲可见区间,这里只算一次 O(n) 下标表。
-        // 性能关键:全文搜索走**按 body 指针缓存的可搜索文本**([`flow_search_text`]),
-        // 解码(gzip/charset)只在每条流首次入索引时做一次,之后每次键击只是子串匹配 —— 不再「输入即卡死」。
+        // 性能关键:全文 / 子串走**按 body 指针缓存的可搜索文本**([`flow_search_text`]),
+        // 解码(gzip/charset)只在每条流首次入索引时做一次 —— 不再「输入即卡死」。
         let mut visible: Vec<usize> = self
             .flows
             .iter()
             .enumerate()
             .filter(|(_, f)| {
-                proto.matches(f)
-                    && host_filter
-                        .as_ref()
-                        .map(|h| site_of(&f.host) == *h)
-                        .unwrap_or(true)
-                    && (query.is_empty() || flow_search_text(f).contains(&query))
+                if !proto.matches(f) {
+                    return false;
+                }
+                if let Some(h) = host_filter.as_ref() {
+                    if site_of(&f.host) != *h {
+                        return false;
+                    }
+                }
+                if raw_query.is_empty() {
+                    return true;
+                }
+                match &httpql {
+                    Some(q) => {
+                        // 结构化字段(method/host/status… 廉价取自 flow);body 子句/全文走缓存 searchable。
+                        let url = f.url();
+                        let ext = path_ext(&f.path);
+                        let req_h = join_headers(&f.req_headers);
+                        let resp_h = join_headers(&f.resp_headers);
+                        let search = flow_search_text(f);
+                        let ff = scry_httpql::FlowFields {
+                            method: &f.method,
+                            host: &f.host,
+                            path: &f.path,
+                            url: &url,
+                            ext,
+                            port: f.port,
+                            status: f.status,
+                            req_len: f.req_body.len(),
+                            resp_len: f.resp_body.len(),
+                            mime: f.content_type().unwrap_or(""),
+                            req_headers: &req_h,
+                            resp_headers: &resp_h,
+                            searchable: search.as_str(),
+                        };
+                        q.matches(&ff)
+                    }
+                    None => flow_search_text(f).contains(&query),
+                }
             })
             .map(|(i, _)| i)
             .collect();
@@ -345,6 +387,7 @@ impl ScryApp {
         }
         match self.hist_tab {
             HistTab::WebSocket => root.child(self.ws_panel(cx)),
+            HistTab::SiteMap => root.child(self.sitemap_panel(cx)),
             HistTab::Intercept => root.child(self.intercept_panel(cx)),
             HistTab::Options => root.child(self.options_panel(cx)),
             HistTab::History => root.child(table).child(messages),
@@ -717,6 +760,8 @@ impl ScryApp {
             self.message_placeholder(self.lang.t("Select a row above to view the message"), cx)
         } else if view_mode == MsgView::Pretty {
             self.pretty_message_view(is_req, cx)
+        } else if view_mode == MsgView::Render {
+            self.render_preview(is_req, cx)
         } else {
             let input = if is_req { self.msg_req.clone() } else { self.msg_resp.clone() };
             div()
@@ -790,6 +835,80 @@ impl ScryApp {
             view = view.lines(crate::highlight::body_lines(headers, body, MSG_MAX_LINES, lang, c));
         }
         view.into_any_element()
+    }
+
+    /// 渲染(Render)视图:对**响应**做可视化预览(请求面板无 Render,仅占位提示)。
+    fn render_preview(&self, is_req: bool, cx: &mut Context<Self>) -> AnyElement {
+        if is_req {
+            return self
+                .message_placeholder(self.lang.t("Render view applies to responses only."), cx);
+        }
+        self.response_preview(self.current_flow(), cx)
+    }
+
+    /// 响应「渲染」预览:位图 `image/*` 解码 + 落临时文件 + `img()` 直显;HTML/SVG/其它给说明。
+    /// **Proxy / Repeater / Intruder 响应面板共用**(各传自己的响应流)。
+    pub(crate) fn response_preview(
+        &self,
+        flow: Option<&HttpFlow>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = cx.theme().colors;
+        let t = cx.theme().tokens;
+        let lang = self.lang;
+        let f = match flow {
+            Some(f) => f,
+            None => {
+                return self
+                    .message_placeholder(lang.t("Select a row above to view the message"), cx)
+            }
+        };
+        if f.status == 0 {
+            return self.message_placeholder(lang.t("Awaiting response…"), cx);
+        }
+        let ct = f.content_type().unwrap_or("").to_ascii_lowercase();
+
+        // 图片(位图)→ 解码 + 落临时文件 + img() 预览。SVG 是文本,走源码视图(Pretty/Raw)更合适。
+        if ct.starts_with("image/") && !ct.contains("svg") {
+            let raw = scry_decode::decode_body(&f.resp_headers, &f.resp_body);
+            if raw.is_empty() {
+                return self.message_placeholder(lang.t("(empty body)"), cx);
+            }
+            let dims = format!("{} · {} bytes", ct, raw.len());
+            match write_preview_file(&raw, &ct) {
+                Some(path) => {
+                    return div()
+                        .id("render-preview")
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(t.space.sm)
+                        .p(t.space.md)
+                        .child(img(path).max_w(px(760.0)).max_h(px(560.0)).rounded(t.radius.md))
+                        .child(
+                            div()
+                                .text_size(t.font_size.xs)
+                                .text_color(c.text_subtle)
+                                .child(dims),
+                        )
+                        .into_any_element();
+                }
+                None => return self.message_placeholder(lang.t("Preview failed"), cx),
+            }
+        }
+
+        let note = if ct.contains("html") {
+            lang.t("HTML preview: switch to Pretty / Raw to read the source (full rendering needs a browser).")
+        } else if ct.contains("svg") {
+            lang.t("SVG is text — view it under Pretty / Raw.")
+        } else {
+            lang.t("No visual preview for this content type. Use Pretty / Raw / Hex.")
+        };
+        self.message_placeholder(note, cx)
     }
 
     /// 报文正文占位(无选中流 / 响应未到时居中显示)。
@@ -946,6 +1065,27 @@ fn mark_color(idx: usize, c: ThemeColors) -> Hsla {
     }
 }
 
+/// 把图片字节落到 `~/.scry/preview/<sha1>.<ext>`(按内容哈希命名 → 同图复用 gpui 缓存),返回路径。
+/// best-effort:写失败返回 `None`。
+fn write_preview_file(bytes: &[u8], content_type: &str) -> Option<std::path::PathBuf> {
+    let ext = match content_type {
+        ct if ct.contains("png") => "png",
+        ct if ct.contains("jpeg") || ct.contains("jpg") => "jpg",
+        ct if ct.contains("gif") => "gif",
+        ct if ct.contains("webp") => "webp",
+        ct if ct.contains("bmp") => "bmp",
+        ct if ct.contains("icon") || ct.contains("ico") => "ico",
+        _ => "img",
+    };
+    let dir = scry_ca::default_ca_dir().join("preview");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{}.{ext}", scry_core::sha1_hex(bytes)));
+    if !path.exists() {
+        std::fs::write(&path, bytes).ok()?;
+    }
+    Some(path)
+}
+
 /// WebSocket payload 单行预览(截断 + 去换行 / 制表)。
 fn ws_preview(payload: &[u8]) -> String {
     let n = payload.len().min(160);
@@ -977,13 +1117,8 @@ pub(crate) fn message_text(lang: Lang, is_req: bool, f: &HttpFlow, view: MsgView
         return lang.t("Awaiting response…").to_string();
     }
     match view {
-        MsgView::Render => lang
-            .t(if is_req {
-                "Render view applies to responses only."
-            } else {
-                "Rendered preview is not available in this MVP."
-            })
-            .to_string(),
+        // Render 视图由 `response_preview`(图片预览)处理,不走文本路径 → 文本框置空。
+        MsgView::Render => String::new(),
         MsgView::Hex => cap_text(&hexdump(body, 8192, lang).join("\n"), body.len(), lang),
         MsgView::Raw | MsgView::Pretty => {
             let first = if is_req {
@@ -1135,6 +1270,28 @@ thread_local! {
 const SEARCH_CACHE_CAP: usize = 2048;
 /// 每个 body 进搜索索引的解码字符上限(够搜 URL / 参数 / JSON 头部,避免给大响应建超大索引)。
 const SEARCH_BODY_CHARS: usize = 8192;
+
+/// 取路径的扩展名(`/a/b.js?x=1` → `js`;无则空)。供 HTTPQL `req.ext` 字段用。
+fn path_ext(path: &str) -> &str {
+    let p = path.split(['?', '#']).next().unwrap_or(path);
+    let seg = p.rsplit('/').next().unwrap_or(p);
+    match seg.rsplit_once('.') {
+        Some((name, ext)) if !name.is_empty() && !ext.is_empty() => ext,
+        _ => "",
+    }
+}
+
+/// 把头表拼成 `Key: Value\n` 文本(供 HTTPQL `req.headers` / `resp.headers` 字段匹配)。
+fn join_headers(headers: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (k, v) in headers {
+        s.push_str(k);
+        s.push_str(": ");
+        s.push_str(v);
+        s.push('\n');
+    }
+    s
+}
 
 /// 取(或构建并缓存)一条流的小写可搜索文本:url + 头 + 解码后的 req/resp body(截断)。
 fn flow_search_text(f: &HttpFlow) -> Rc<String> {

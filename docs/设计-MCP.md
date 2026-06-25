@@ -26,17 +26,28 @@
 - `tools/list` → 工具清单(name + description + inputSchema)。
 - `tools/call` → `{name, arguments}` → `{content:[{type:"text", text}], isError?}`。
 
-## 工具清单(本期 8 个)
+## 工具清单(15 个)
 | 工具 | 作用 | 关键参数 |
 |---|---|---|
 | `list_flows` | 列最近抓到的流量(代理历史) | `limit`、`filter`(URL/host 子串) |
 | `get_flow` | 看某条流的完整请求 + 响应(解码正文) | `index`(list 序号)或 `url` |
+| `query_flows` | 用 **HTTPQL** 结构化查询历史(对标 Caido) | `query`(如 `resp.status.gte:400 AND req.host.cont:api`)、`limit` |
 | `send_request` | 重放 / 主动发一个请求(=Repeater) | `url`、`method`、`headers`、`body` |
 | `passive_scan` | 对历史流量跑被动规则 | `host`、`limit` |
 | `active_scan` | 对 URL / 历史流量发主动探测(SQLi/XSS/路径穿越) | `url` 或 `host`、`limit` |
 | `discovery_scan` | Nikto 式敏感文件 / 路径探测 | `url`(目标 origin) |
+| `nuclei_scan` | nuclei 模板扫描(内置 + 可选本地模板目录) | `url`、`dir`(可选 nuclei-templates 目录) |
+| `param_miner` | 隐藏参数挖掘(字典金丝雀 + 反射检测) | `url` |
 | `authz_test` | 越权 / 访问控制测试(高/低/匿名多身份重放比对) | `url`、`high_headers`、`low_headers` |
+| `jwt` | JWT 攻击套件(decode/none/sign/kid/verify/crack) | `action`、`token`、`payload`、`secret`、`kid` |
+| `graphql` | GraphQL(introspect 拉 schema / prettify / minify) | `action`、`url`、`query` |
+| `sequencer` | 令牌随机性 / 熵分析(对标 Burp Sequencer) | `tokens`(多行样本) |
+| `compare` | 两段文本 LCS diff(对标 Comparer) | `a`、`b`、`granularity` |
 | `decode` | 编解码 / 加解密 / 哈希(智能解码 or 指定变换) | `input`、`transform`、`key`、`iv` |
+
+> 新增的 7 个工具(`query_flows`/`nuclei_scan`/`param_miner`/`jwt`/`graphql`/`sequencer`/`compare`)同样复用与 GUI 同源的纯函数内核
+> (`scry_httpql`/`scry_nuclei`/`scry_scan::param_miner`/`scry_jwt`/`scry_graphql`/`scry_seq`/`scry_diff`)+ `replay` 发包,不抢 8888。
+> **未纳入**:`sqli`/`xss` 深度专项(多阶段自适应,暂由 `active_scan` 覆盖基础)、`race`/`smuggle`(底层 socket / 并发编排,stdio 复刻成本高)。
 
 所有发包工具响应里都带响应状态 / 头 / 解码正文(正文截断 ~4000 字符);扫描类回 findings 数组
 (`rule_id/title/severity/url/detail`)。

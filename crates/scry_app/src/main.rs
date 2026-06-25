@@ -7,13 +7,19 @@
 //! - [`chrome`]:外壳(顶栏 / 左栏 / Inspector / 图标栏 / 状态栏)+ [`gpui::Render`]。
 //! - [`proxy`]:Proxy 页(拦截 / 历史表 / 报文视图)。
 //! - [`repeater`]:Repeater 页(改包重发)+ 报文解析单测。
+//! - [`compose`]:Compose 页(从零构造请求 + `{{var}}` 环境变量 + 集合保存)—— 对标 Reqable Compose / Postman。
+//! - [`graphql`]:GraphQL 页(查询美化/压缩 + 变量分离 + introspection 拉 schema)—— UI 接 `scry_graphql` 内核。
 //! - [`launcher`]:流量源启动器(T1 内置浏览器 / T2 托管启动程序 —— scry 自管流量源)。
 //! - [`intruder`]:Intruder 爆破页(§标记§ + 载荷 + 批量发包)+ 引擎单测。
 //! - [`sqli`]:SQLi 页(sqlmap 式 SQL 注入检测与利用)—— UI 接 `scry_sqli` 内核。
 //! - [`xss`]:XSS 页(dalfox 式上下文感知反射型 XSS)—— UI 接 `scry_xss` 内核。
 //! - [`authz`]:Authz 页(Autorize 式越权 / 访问控制测试)—— UI 接 `scry_scan::authz` 内核。
+//! - [`race`]:Race 页(竞态 / single-packet:同一请求并发 N 路,最后字节同步)—— UI 接 `scry_proxy::race` 内核。
+//! - [`nuclei`]:Nuclei 页(nuclei 式 YAML 模板扫描)—— UI 接 `scry_nuclei` 内核。
+//! - [`session`]:Session 页(登录宏 + 会话/令牌捕获注入 + 自动重登)—— UI 接 `scry_session` 内核。
 //! - [`sequencer`]:Sequencer 页(令牌随机性 / 熵分析)—— UI 接 `scry_seq` 内核。
 //! - [`decoder`]:Decoder 页(URL/HTML/Base64/Hex 编解码 + 哈希)—— UI 接 `scry_codec` 内核。
+//! - [`jwt`]:JWT 页(JWT 攻击套件:解码 + alg:none / 弱密钥 HS256 / kid 注入 / 弱密钥爆破)—— UI 接 `scry_jwt` 内核。
 //! - [`comparer`]:Comparer 页(两段文本 diff)—— UI 接 `scry_diff` 内核。
 //! - [`crawler`]:站点爬虫(Spider)异步 runner —— UI 接 `scry_crawl` 内核(种子 → BFS 抓取 → 发现页落库)。
 //! - [`logger`]:Logger 页(实时事件日志:抓包 / 扫描 / 证书 / 上游 等)。
@@ -23,28 +29,39 @@ mod capture;
 mod cert;
 mod chrome;
 mod comparer;
+mod compose;
 mod crawler;
 mod dashboard;
 mod decoder;
 mod ext;
+mod graphql;
 mod har;
 mod highlight;
 mod i18n;
 mod intercept;
 mod intruder;
+mod jwt;
 mod launcher;
 mod logger;
 mod model;
+mod nuclei;
+mod oob;
 mod proxy;
+mod race;
 mod repeater;
+mod report;
 mod rules;
 mod scanner;
 mod sequencer;
+mod session;
 mod settings;
+mod sitemap;
 mod spider;
 mod sqli;
 mod state;
+mod stats;
 mod widgets;
+mod ws_repeater;
 mod xss;
 
 use mage_ui::prelude::*;

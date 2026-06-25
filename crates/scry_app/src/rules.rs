@@ -388,6 +388,141 @@ impl CompiledReplace {
     }
 }
 
+// ───────────────────────── Map Local / Map Remote / Mock ─────────────────────────
+//
+// 对标 Reqable:
+// - **Map Remote**:命中 → 把连接目标重定向到另一 host[:port](在连上游前生效,见 mitm/proxy_plain)。
+// - **Map Local**:命中 → 用本地文件内容作为响应**短路返回**(走 `HookAction::Respond`)。
+// - **Mock**:命中 → 用内联 status/headers/body **短路返回**。
+// 三者共用条件系统([`Condition`]);Local/Mock 在 `on_request` 钩子短路,Remote 经 `remap_target`。
+
+/// Map 规则的动作。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MapAction {
+    /// 重定向连接目标:`to_host` 为空 = 不改 host;`to_port == 0` = 不改 port。
+    Remote { to_host: String, to_port: u16 },
+    /// 用本地文件内容作为响应(200,content-type 按扩展名猜)。
+    Local { file: String },
+    /// 内联响应。
+    Mock {
+        status: u16,
+        content_type: String,
+        body: String,
+    },
+}
+
+/// 一条 Map 规则(UI 可编辑纯结构)。
+#[derive(Clone)]
+pub struct MapRule {
+    pub enabled: bool,
+    pub cond: Condition,
+    pub action: MapAction,
+}
+
+/// 编译后的 Map 规则。
+pub struct CompiledMap {
+    pub enabled: bool,
+    cond: CompiledCond,
+    action: MapAction,
+}
+
+impl MapRule {
+    pub fn compile(&self) -> CompiledMap {
+        CompiledMap {
+            enabled: self.enabled,
+            cond: self.cond.compile(),
+            action: self.action.clone(),
+        }
+    }
+}
+
+/// Map 规则对某条流的求值结果(短路类)。
+#[derive(Debug, PartialEq, Eq)]
+pub enum MapResult {
+    /// 未命中 / 非短路动作。
+    NoMatch,
+    /// Mock:短路返回内联响应。
+    Mock {
+        status: u16,
+        headers: Vec<Header>,
+        body: Vec<u8>,
+    },
+    /// Map Local:短路返回本地文件(文件读取交调用方,以保持本模块无 IO)。
+    LocalFile {
+        path: String,
+        content_type: String,
+    },
+}
+
+impl CompiledMap {
+    /// 命中且为 Remote → 返回重定向目标 `(host, port)`(空 host / 0 port 用原值兜底)。
+    pub fn remote_target(&self, flow: &HttpFlow) -> Option<(String, u16)> {
+        if !self.enabled {
+            return None;
+        }
+        if let MapAction::Remote { to_host, to_port } = &self.action {
+            if self.cond.matches(flow) {
+                let h = if to_host.is_empty() {
+                    flow.host.clone()
+                } else {
+                    to_host.clone()
+                };
+                let p = if *to_port == 0 { flow.port } else { *to_port };
+                return Some((h, p));
+            }
+        }
+        None
+    }
+
+    /// 命中且为 Local/Mock → 返回短路响应描述;否则 `NoMatch`。
+    pub fn eval_respond(&self, flow: &HttpFlow) -> MapResult {
+        if !self.enabled || !self.cond.matches(flow) {
+            return MapResult::NoMatch;
+        }
+        match &self.action {
+            MapAction::Mock {
+                status,
+                content_type,
+                body,
+            } => MapResult::Mock {
+                status: *status,
+                headers: vec![("Content-Type".to_string(), content_type.clone())],
+                body: body.clone().into_bytes(),
+            },
+            MapAction::Local { file } => MapResult::LocalFile {
+                path: file.clone(),
+                content_type: guess_content_type(file).to_string(),
+            },
+            MapAction::Remote { .. } => MapResult::NoMatch,
+        }
+    }
+}
+
+/// 按文件扩展名猜 content-type(纯函数;未知回退 `application/octet-stream`)。
+pub fn guess_content_type(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
 // ───────────────────────── 持久化(规则存盘 → 重启后自动加载生效) ─────────────────────────
 //
 // 用户诉求:「保存拦截规则,开启后下次遇到这个链接自动执行」。把 UI 规则序列化到
@@ -426,16 +561,29 @@ struct StoredReplace {
     replace: String,
 }
 
+/// 可序列化的 Map 规则。
+#[derive(Serialize, Deserialize)]
+struct StoredMap {
+    enabled: bool,
+    field: Field,
+    op: Op,
+    value: String,
+    negate: bool,
+    action: MapAction,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct StoredRules {
     #[serde(default)]
     scope: Vec<StoredScope>,
     #[serde(default)]
     replace: Vec<StoredReplace>,
+    #[serde(default)]
+    maps: Vec<StoredMap>,
 }
 
 /// 把内存规则编码为 JSON 文本(纯函数,可单测)。
-pub fn serialize_rules(scope: &[ScopeRule], replace: &[ReplaceRule]) -> String {
+pub fn serialize_rules(scope: &[ScopeRule], replace: &[ReplaceRule], maps: &[MapRule]) -> String {
     let stored = StoredRules {
         scope: scope
             .iter()
@@ -459,12 +607,23 @@ pub fn serialize_rules(scope: &[ScopeRule], replace: &[ReplaceRule]) -> String {
                 replace: r.replace.clone(),
             })
             .collect(),
+        maps: maps
+            .iter()
+            .map(|r| StoredMap {
+                enabled: r.enabled,
+                field: r.cond.field,
+                op: r.cond.op,
+                value: r.cond.value.clone(),
+                negate: r.cond.negate,
+                action: r.action.clone(),
+            })
+            .collect(),
     };
     serde_json::to_string_pretty(&stored).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// 从 JSON 文本解码为内存规则(纯函数,可单测;解析失败 → 空)。
-pub fn deserialize_rules(json: &str) -> (Vec<ScopeRule>, Vec<ReplaceRule>) {
+pub fn deserialize_rules(json: &str) -> (Vec<ScopeRule>, Vec<ReplaceRule>, Vec<MapRule>) {
     let stored: StoredRules = serde_json::from_str(json).unwrap_or_default();
     let scope = stored
         .scope
@@ -496,23 +655,105 @@ pub fn deserialize_rules(json: &str) -> (Vec<ScopeRule>, Vec<ReplaceRule>) {
             replace: s.replace,
         })
         .collect();
-    (scope, replace)
+    let maps = stored
+        .maps
+        .into_iter()
+        .map(|s| MapRule {
+            enabled: s.enabled,
+            cond: Condition {
+                field: s.field,
+                op: s.op,
+                value: s.value,
+                negate: s.negate,
+            },
+            action: s.action,
+        })
+        .collect();
+    (scope, replace, maps)
 }
 
 /// 保存规则到 `~/.scry/intercept_rules.json`;best-effort,失败静默(不打断 UI)。
-pub fn save_rules(scope: &[ScopeRule], replace: &[ReplaceRule]) {
+pub fn save_rules(scope: &[ScopeRule], replace: &[ReplaceRule], maps: &[MapRule]) {
     let path = rules_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, serialize_rules(scope, replace));
+    let _ = std::fs::write(&path, serialize_rules(scope, replace, maps));
 }
 
 /// 从磁盘加载规则(文件不存在 / 解析失败 → 空)。
-pub fn load_rules() -> (Vec<ScopeRule>, Vec<ReplaceRule>) {
+pub fn load_rules() -> (Vec<ScopeRule>, Vec<ReplaceRule>, Vec<MapRule>) {
     match std::fs::read_to_string(rules_path()) {
         Ok(s) => deserialize_rules(&s),
-        Err(_) => (Vec::new(), Vec::new()),
+        Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+    }
+}
+
+// ───────────────────────── 活动 WebSocket 改帧规则(持久化)─────────────────────────
+//
+// WS 改帧规则用内核类型 `scry_proxy::websocket::WsRewriteRule`(直接喂给 `ProxyConfig.ws_rewrite`);
+// 这里只负责存盘到 `~/.scry/ws_rules.json`(内核类型不带 serde,用本地 mirror 转换)。
+
+/// WS 规则存盘镜像(`to_server` 拍平方向枚举)。
+#[derive(Serialize, Deserialize)]
+struct StoredWsRule {
+    to_server: bool,
+    find: String,
+    replace: String,
+}
+
+/// WS 改帧规则存盘位置:`~/.scry/ws_rules.json`。
+fn ws_rules_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".scry").join("ws_rules.json")
+}
+
+/// 序列化 WS 规则(纯函数,可单测)。
+pub fn serialize_ws_rules(rules: &[scry_proxy::websocket::WsRewriteRule]) -> String {
+    let stored: Vec<StoredWsRule> = rules
+        .iter()
+        .map(|r| StoredWsRule {
+            to_server: r.dir == scry_proxy::websocket::WsRuleDir::ToServer,
+            find: r.find.clone(),
+            replace: r.replace.clone(),
+        })
+        .collect();
+    serde_json::to_string_pretty(&stored).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 反序列化 WS 规则(坏 JSON → 空)。
+pub fn deserialize_ws_rules(s: &str) -> Vec<scry_proxy::websocket::WsRewriteRule> {
+    serde_json::from_str::<Vec<StoredWsRule>>(s)
+        .map(|v| {
+            v.into_iter()
+                .map(|r| scry_proxy::websocket::WsRewriteRule {
+                    dir: if r.to_server {
+                        scry_proxy::websocket::WsRuleDir::ToServer
+                    } else {
+                        scry_proxy::websocket::WsRuleDir::ToClient
+                    },
+                    find: r.find,
+                    replace: r.replace,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 保存 WS 改帧规则;best-effort,失败静默。
+pub fn save_ws_rules(rules: &[scry_proxy::websocket::WsRewriteRule]) {
+    let path = ws_rules_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, serialize_ws_rules(rules));
+}
+
+/// 加载 WS 改帧规则(文件不存在 / 坏 JSON → 空)。
+pub fn load_ws_rules() -> Vec<scry_proxy::websocket::WsRewriteRule> {
+    match std::fs::read_to_string(ws_rules_path()) {
+        Ok(s) => deserialize_ws_rules(&s),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -699,8 +940,21 @@ mod tests {
             find: "a".to_string(),
             replace: "b".to_string(),
         }];
-        let json = serialize_rules(&scope, &replace);
-        let (s2, r2) = deserialize_rules(&json);
+        let maps = vec![MapRule {
+            enabled: true,
+            cond: Condition {
+                field: Field::Host,
+                op: Op::Equals,
+                value: "api.example.com".to_string(),
+                negate: false,
+            },
+            action: MapAction::Remote {
+                to_host: "127.0.0.1".to_string(),
+                to_port: 8080,
+            },
+        }];
+        let json = serialize_rules(&scope, &replace, &maps);
+        let (s2, r2, m2) = deserialize_rules(&json);
         assert_eq!(s2.len(), 1);
         assert!(matches!(s2[0].dir, InterceptDir::Response));
         assert_eq!(s2[0].cond.field, Field::Url);
@@ -711,11 +965,154 @@ mod tests {
         assert!(r2[0].is_regex && !r2[0].enabled);
         assert_eq!(r2[0].target, Target::RespBody);
         assert_eq!(r2[0].replace, "b");
+        assert_eq!(m2.len(), 1);
+        assert!(matches!(
+            &m2[0].action,
+            MapAction::Remote { to_host, to_port } if to_host == "127.0.0.1" && *to_port == 8080
+        ));
     }
 
     #[test]
     fn deserialize_garbage_is_empty() {
-        let (s, r) = deserialize_rules("not valid json");
-        assert!(s.is_empty() && r.is_empty());
+        let (s, r, m) = deserialize_rules("not valid json");
+        assert!(s.is_empty() && r.is_empty() && m.is_empty());
+    }
+
+    fn map(action: MapAction, field: Field, op: Op, value: &str) -> CompiledMap {
+        MapRule {
+            enabled: true,
+            cond: Condition {
+                field,
+                op,
+                value: value.to_string(),
+                negate: false,
+            },
+            action,
+        }
+        .compile()
+    }
+
+    #[test]
+    fn map_remote_redirects_matching_host() {
+        let f = flow();
+        let m = map(
+            MapAction::Remote {
+                to_host: "10.0.0.1".to_string(),
+                to_port: 9000,
+            },
+            Field::Host,
+            Op::Equals,
+            "api.example.com",
+        );
+        assert_eq!(m.remote_target(&f), Some(("10.0.0.1".to_string(), 9000)));
+        // 不命中 host → 不重定向。
+        let m2 = map(
+            MapAction::Remote {
+                to_host: "10.0.0.1".to_string(),
+                to_port: 9000,
+            },
+            Field::Host,
+            Op::Equals,
+            "other.com",
+        );
+        assert_eq!(m2.remote_target(&f), None);
+        // 空 host / 0 port → 用原值兜底。
+        let m3 = map(
+            MapAction::Remote {
+                to_host: String::new(),
+                to_port: 0,
+            },
+            Field::Host,
+            Op::Equals,
+            "api.example.com",
+        );
+        assert_eq!(m3.remote_target(&f), Some(("api.example.com".to_string(), 443)));
+    }
+
+    #[test]
+    fn map_mock_short_circuits() {
+        let f = flow();
+        let m = map(
+            MapAction::Mock {
+                status: 503,
+                content_type: "application/json".to_string(),
+                body: "{\"mock\":true}".to_string(),
+            },
+            Field::Path,
+            Op::Contains,
+            "/v1/login",
+        );
+        match m.eval_respond(&f) {
+            MapResult::Mock {
+                status,
+                headers,
+                body,
+            } => {
+                assert_eq!(status, 503);
+                assert_eq!(body, b"{\"mock\":true}");
+                assert!(headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/json"));
+            }
+            other => panic!("expected Mock, got {other:?}"),
+        }
+        // Remote 动作在 eval_respond 中视为 NoMatch(它走 remote_target)。
+        let r = map(
+            MapAction::Remote {
+                to_host: "x".to_string(),
+                to_port: 1,
+            },
+            Field::Path,
+            Op::Contains,
+            "/v1/login",
+        );
+        assert_eq!(r.eval_respond(&f), MapResult::NoMatch);
+    }
+
+    #[test]
+    fn map_local_resolves_file_and_content_type() {
+        let f = flow();
+        let m = map(
+            MapAction::Local {
+                file: "/tmp/x.json".to_string(),
+            },
+            Field::Url,
+            Op::Contains,
+            "/v1/login",
+        );
+        match m.eval_respond(&f) {
+            MapResult::LocalFile { path, content_type } => {
+                assert_eq!(path, "/tmp/x.json");
+                assert_eq!(content_type, "application/json; charset=utf-8");
+            }
+            other => panic!("expected LocalFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_type_guess() {
+        assert_eq!(guess_content_type("a.png"), "image/png");
+        assert_eq!(guess_content_type("a.HTML"), "text/html; charset=utf-8");
+        assert_eq!(guess_content_type("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn ws_rules_serde_roundtrip() {
+        use scry_proxy::websocket::{WsRewriteRule, WsRuleDir};
+        let rules = vec![
+            WsRewriteRule {
+                dir: WsRuleDir::ToServer,
+                find: "ping".into(),
+                replace: "PWN".into(),
+            },
+            WsRewriteRule {
+                dir: WsRuleDir::ToClient,
+                find: "balance".into(),
+                replace: "999".into(),
+            },
+        ];
+        let json = serialize_ws_rules(&rules);
+        let back = deserialize_ws_rules(&json);
+        assert_eq!(back, rules);
+        // 坏 JSON → 空。
+        assert!(deserialize_ws_rules("not json").is_empty());
     }
 }

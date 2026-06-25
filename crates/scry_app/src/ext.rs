@@ -15,10 +15,13 @@ use mage_ui::prelude::*;
 use scry_core::HttpFlow;
 use scry_ext_api::{
     ExtKind, ExtManifest, Extension, ExtensionHost, Finding, HookAction, HostServices,
-    LogLevel as ExtLevel, Permission, Severity,
+    LogLevel as ExtLevel, Permission, Severity, SynthResponse,
 };
 
-use crate::rules::{should_intercept, CompiledReplace, CompiledScope, ReplaceRule, ScopeRule};
+use crate::rules::{
+    should_intercept, CompiledMap, CompiledReplace, CompiledScope, MapResult, MapRule, ReplaceRule,
+    ScopeRule,
+};
 use crate::state::ScryApp;
 use crate::widgets::section_label;
 
@@ -114,6 +117,8 @@ pub struct ExtRegistry {
     scope_rules: Mutex<Vec<CompiledScope>>,
     /// Match & Replace 自动改包规则(编译快照)。
     replace_rules: Mutex<Vec<CompiledReplace>>,
+    /// Map Local / Map Remote / Mock 规则(编译快照)。
+    map_rules: Mutex<Vec<CompiledMap>>,
 }
 
 impl ExtRegistry {
@@ -167,6 +172,7 @@ impl ExtRegistry {
             intercept_seq: AtomicU64::new(0),
             scope_rules: Mutex::new(Vec::new()),
             replace_rules: Mutex::new(Vec::new()),
+            map_rules: Mutex::new(Vec::new()),
         }
     }
 
@@ -205,6 +211,48 @@ impl ExtRegistry {
             .lock()
             .map(|rules| rules.iter().any(|r| r.enabled && !r.target.is_request()))
             .unwrap_or(false)
+    }
+
+    /// 更新 Map Local / Map Remote / Mock 规则(同 scope/replace)。
+    pub fn set_map_rules(&self, rules: &[MapRule]) {
+        let compiled: Vec<CompiledMap> = rules.iter().map(|r| r.compile()).collect();
+        if let Ok(mut g) = self.map_rules.lock() {
+            *g = compiled;
+        }
+    }
+
+    /// 在 `on_request` 里求值 Map Local / Mock:命中则返回短路响应(`Respond`),否则 `None`。
+    /// Map Remote 不在此处(它在连上游前经 [`ExtensionHost::remap_target`] 改目标)。
+    fn map_respond(&self, flow: &HttpFlow) -> Option<HookAction> {
+        let rules = self.map_rules.lock().ok()?;
+        for r in rules.iter() {
+            match r.eval_respond(flow) {
+                MapResult::NoMatch => continue,
+                MapResult::Mock {
+                    status,
+                    headers,
+                    body,
+                } => {
+                    return Some(HookAction::Respond(SynthResponse {
+                        status,
+                        headers,
+                        body,
+                    }))
+                }
+                MapResult::LocalFile { path, content_type } => match std::fs::read(&path) {
+                    Ok(body) => {
+                        return Some(HookAction::Respond(SynthResponse {
+                            status: 200,
+                            headers: vec![("Content-Type".to_string(), content_type)],
+                            body,
+                        }))
+                    }
+                    // 文件读不到 → 跳过该规则(不短路,继续走真实请求)。
+                    Err(_) => continue,
+                },
+            }
+        }
+        None
     }
 
     // ── 交互式拦截(Intercept) ──
@@ -464,6 +512,10 @@ impl ExtensionHost for ExtRegistry {
                 other => return other, // 第一个决定性动作(Drop/Respond/Pause)生效
             }
         }
+        // Map Local / Mock:命中则用本地文件 / 内联响应短路返回(在 Match & Replace 之前)。
+        if let Some(action) = self.map_respond(flow) {
+            return action;
+        }
         // 自动改包(Match & Replace,请求向规则)在扩展之后、交互式拦截之前应用,
         // 这样用户在「拦截」页看到的就是替换后的报文。
         self.apply_replace(flow, true);
@@ -507,6 +559,18 @@ impl ExtensionHost for ExtRegistry {
                 le.enabled.load(Ordering::Relaxed)
                     && le.ext.manifest().hooks.iter().any(|h| h == "on_response")
             })
+    }
+
+    fn remap_target(&self, host: &str, port: u16) -> Option<(String, u16)> {
+        let rules = self.map_rules.lock().ok()?;
+        // 用「仅含 host/port」的探针流匹配 Remote 规则的条件(典型按 Host / URL 前缀)。
+        let probe = HttpFlow::request("GET", "https", host, port, "/", vec![], vec![]);
+        for r in rules.iter() {
+            if let Some(target) = r.remote_target(&probe) {
+                return Some(target);
+            }
+        }
+        None
     }
 }
 

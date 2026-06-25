@@ -323,19 +323,124 @@ impl ScryApp {
                 .flex()
                 .flex_col()
                 .gap(t.space.sm)
-                .child(DetailRow::new(IconName::Globe, l.t("Proxy address")).value("127.0.0.1:8888"))
                 .child(
                     div()
-                        .text_size(t.font_size.xs)
-                        .text_color(c.text_subtle)
-                        .child(l.t("Point Proxifier (or system proxy) to this address.")),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(t.space.sm)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w(px(0.0))
+                                .child(
+                                    div()
+                                        .text_size(t.font_size.sm)
+                                        .text_color(c.text_muted)
+                                        .child(if l.is_zh() { "代理监听端口" } else { "Proxy listen port" }),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(t.font_size.xs)
+                                        .text_color(c.text_subtle)
+                                        .child(if l.is_zh() {
+                                            "手机 / Proxifier / 系统代理指向本机这个端口(改后重启抓包生效)"
+                                        } else {
+                                            "Point your phone / Proxifier / system proxy here (restart capture to apply)"
+                                        }),
+                                ),
+                        )
+                        .child(div().w(px(120.0)).child(self.proxy_port.clone())),
                 )
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(t.space.sm)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w(px(0.0))
+                                .child(
+                                    div()
+                                        .text_size(t.font_size.sm)
+                                        .text_color(c.text_muted)
+                                        .child(if l.is_zh() { "允许局域网设备(手机)抓包" } else { "Allow LAN devices (phone)" }),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(t.font_size.xs)
+                                        .text_color(c.text_subtle)
+                                        .child(if l.is_zh() {
+                                            "开 = 监听 0.0.0.0,同一 Wi‑Fi 的手机可连;关 = 仅本机 127.0.0.1"
+                                        } else {
+                                            "On = listen on 0.0.0.0 for same‑Wi‑Fi phones; Off = local only"
+                                        }),
+                                ),
+                        )
+                        .child(
+                            Switch::new("proxy-lan-toggle", self.proxy_lan)
+                                .disabled(self.capturing)
+                                .on_toggle(cx.listener(|this, _e, _w, cx| {
+                                    this.proxy_lan = !this.proxy_lan;
+                                    let port = this
+                                        .proxy_port
+                                        .read(cx)
+                                        .text()
+                                        .trim()
+                                        .parse::<u16>()
+                                        .ok()
+                                        .filter(|p| *p > 0)
+                                        .unwrap_or(8888);
+                                    crate::capture::save_net_cfg(port, this.proxy_lan);
+                                    this.push_log(
+                                        LogLevel::Info,
+                                        "capture",
+                                        if this.proxy_lan {
+                                            "已允许局域网设备(手机)连本机代理(重启抓包生效)"
+                                        } else {
+                                            "代理仅监听本机(重启抓包生效)"
+                                        },
+                                    );
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child({
+                    // 监听地址预览 + 手机配置指引(局域网开启时显示本机 IP,方便手机填代理)。
+                    let port = self
+                        .proxy_port
+                        .read(cx)
+                        .text()
+                        .trim()
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|p| *p > 0)
+                        .unwrap_or(8888);
+                    let hint = if self.proxy_lan {
+                        match crate::capture::lan_ip() {
+                            Some(ip) if l.is_zh() => format!(
+                                "手机:同一 Wi‑Fi → 设置 → Wi‑Fi → 代理(手动)→ 服务器 {ip}、端口 {port};再用 AirDrop 把 ~/.scry/cert-bundle 里的 .mobileconfig / ca.pem 发到手机装信任(见上方『导出安装包』)"
+                            ),
+                            Some(ip) => format!(
+                                "Phone: same Wi‑Fi → Settings → Wi‑Fi → Proxy (Manual) → Server {ip}, Port {port}; then AirDrop the .mobileconfig/ca.pem from ~/.scry/cert-bundle to install trust"
+                            ),
+                            None if l.is_zh() => format!("监听 0.0.0.0:{port}(局域网设备可连)"),
+                            None => format!("Listening on 0.0.0.0:{port}"),
+                        }
+                    } else if l.is_zh() {
+                        format!("监听 127.0.0.1:{port}(仅本机;Proxifier / 系统代理指向它)")
+                    } else {
+                        format!("Listening on 127.0.0.1:{port} (local only)")
+                    };
+                    div()
                         .text_size(t.font_size.xs)
                         .text_color(c.text_subtle)
-                        .child(l.t("Behind Quantumult X / Surge? Use Proxifier to route the target process to Scry; add a Direct rule for Scry itself to avoid a loop.")),
-                )
+                        .child(SharedString::from(hint))
+                })
                 .child(divider(c))
                 .child(
                     div()
@@ -468,6 +573,63 @@ impl ScryApp {
                     .child(l.t("JA4 is the real upstream fingerprint (order-stable). JA3 varies per connection; an exact browser match needs BoringSSL.")),
             );
 
+        // 弱网 / 限速模拟下拉(下次开始抓包生效)。
+        let throttle_names: Vec<SharedString> = scry_proxy::throttle::PRESETS
+            .iter()
+            .map(|(n, _)| l.t(n))
+            .collect();
+        let view_tht = cx.entity();
+        let view_ths = cx.entity();
+        let throttle_select = Select::new("throttle-select", throttle_names, self.throttle_sel)
+            .width(px(180.0))
+            .open(self.throttle_open)
+            .on_toggle(move |_e, _w, app| {
+                view_tht.update(app, |this, cx| {
+                    this.throttle_open = !this.throttle_open;
+                    cx.notify();
+                });
+            })
+            .on_select(move |i, _e, _w, app| {
+                view_ths.update(app, |this, cx| {
+                    this.throttle_sel = i;
+                    this.throttle_open = false;
+                    let name = scry_proxy::throttle::PRESETS
+                        .get(i)
+                        .map(|(n, _)| *n)
+                        .unwrap_or("Off");
+                    this.push_log(
+                        LogLevel::Info,
+                        "throttle",
+                        format!("弱网模拟档设为「{name}」(重启抓包生效)"),
+                    );
+                    cx.notify();
+                });
+            });
+        let throttle_block = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(t.space.sm)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .text_size(t.font_size.sm)
+                            .text_color(c.text_muted)
+                            .child(l.t("Network throttle")),
+                    )
+                    .child(
+                        div()
+                            .text_size(t.font_size.xs)
+                            .text_color(c.text_subtle)
+                            .child(l.t("Simulate slow networks (2G/3G). Applies on next capture start.")),
+                    ),
+            )
+            .child(throttle_select);
+
         let proxy_card = card(c, t)
             .child(section_label(l.t("Proxy & Capture"), c, t))
             .child(divider(c))
@@ -488,6 +650,8 @@ impl ScryApp {
             .child(mode_specific)
             .child(divider(c))
             .child(tls_block)
+            .child(divider(c))
+            .child(throttle_block)
             .child(divider(c))
             .child(
                 div()

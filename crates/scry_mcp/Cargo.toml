@@ -18,6 +18,16 @@ scry_proxy.workspace = true
 scry_scan.workspace = true
 scry_codec.workspace = true
 scry_decode.workspace = true
+# 进一步把工作台能力暴露给 AI:HTTPQL 查询 / JWT / 序列器 / 比较器 / GraphQL / nuclei。
+scry_httpql.workspace = true
+scry_jwt.workspace = true
+scry_seq.workspace = true
+scry_diff.workspace = true
+scry_graphql.workspace = true
+scry_nuclei.workspace = true
+# SQLi / XSS 专项注入检测内核(多阶段:注入点 → 载荷 → 判定)。
+scry_sqli.workspace = true
+scry_xss.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true

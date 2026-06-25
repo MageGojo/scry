@@ -7,15 +7,20 @@
 //! - [`active`]:由基准流生成主动探测变异请求([`generate_probes`])+ 命中判定([`evaluate`])。
 //! - [`discovery`]:Nikto 式「敏感文件 / 路径」主动探测(内置高危路径库 + soft-404 基线)。
 //! - [`authz`]:越权 / 访问控制测试(Autorize 式多身份重放比对:未授权访问 / 水平+垂直越权)。
+//! - [`oob`]:OOB 带外盲注探测生成(盲 SSRF/RCE/SQLi/XXE/盲打 XSS;配合 `scry_oob` 客户端确认回连)。
 
 pub mod active;
 pub mod authz;
 pub mod discovery;
+pub mod oob;
+pub mod param_miner;
 pub mod passive;
 pub mod types;
 
 pub use active::{evaluate, generate_probes, Probe, ProbeKind};
 pub use authz::{apply_identity, AuthVerdict, Identity};
 pub use discovery::{evaluate_path, origins, probe_flow, Origin, SensitivePath, Sig};
+pub use oob::{generate_oob_probes, OobProbe, OobProbeKind};
+pub use param_miner::{inject_query, make_probes, reflected, ParamProbe, PARAM_WORDLIST};
 pub use passive::{scan_flow, scan_flows};
 pub use types::{Finding, Severity};

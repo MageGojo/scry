@@ -1780,7 +1780,7 @@ impl ScryApp {
         };
 
         let has_flow = sel_flow.is_some();
-        let rp_views = [MsgView::Pretty, MsgView::Raw, MsgView::Hex];
+        let rp_views = [MsgView::Pretty, MsgView::Raw, MsgView::Hex, MsgView::Render];
         let rv_idx = rp_views.iter().position(|m| *m == self.it_resp_view).unwrap_or(0);
         let view = cx.entity();
         let resp_seg = Segmented::new("it-resp-view")
@@ -1847,6 +1847,9 @@ impl ScryApp {
                         .child(self.lang.t("Select a result to view the response")),
                 )
                 .into_any_element()
+        } else if self.it_resp_view == MsgView::Render && sel_err.is_none() {
+            // 渲染视图:图片直接预览(复用代理响应预览),非文本框。
+            self.response_preview(sel_flow, cx)
         } else {
             div()
                 .id("it-resp-scroll")

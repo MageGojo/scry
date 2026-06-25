@@ -15,7 +15,7 @@ use scry_core::HttpFlow;
 use crate::ext::{InterceptDecision, InterceptDir};
 use crate::model::MONO;
 use crate::repeater::{parse_raw_request, render_raw_request, render_raw_response, target_string};
-use crate::rules::{Condition, Field, Op, ReplaceRule, ScopeRule, Target};
+use crate::rules::{Condition, Field, MapAction, MapRule, Op, ReplaceRule, ScopeRule, Target};
 use crate::state::{HistTab, ScryApp, Tab};
 use crate::widgets::{divider, section_label};
 
@@ -399,9 +399,10 @@ impl ScryApp {
     pub fn sync_rules_to_engine(&self) {
         self.ext.set_scope_rules(&self.scope_rules);
         self.ext.set_replace_rules(&self.replace_rules);
+        self.ext.set_map_rules(&self.map_rules);
         // 任何规则变更都经此 → 顺手存盘;下次启动 `load_rules` 自动恢复
-        //(= 开启后下次遇到同一链接自动执行拦截 / 改包,无需重新配置)。
-        crate::rules::save_rules(&self.scope_rules, &self.replace_rules);
+        //(= 开启后下次遇到同一链接自动执行拦截 / 改包 / Map,无需重新配置)。
+        crate::rules::save_rules(&self.scope_rules, &self.replace_rules, &self.map_rules);
     }
 
     // ── 自定义拦截范围(Scope)──
@@ -483,6 +484,88 @@ impl ScryApp {
         }
     }
 
+    // ── Map Local / Map Remote / Mock ──
+
+    pub fn add_map_rule(&mut self, cx: &mut Context<Self>) {
+        let m = self.map_match.read(cx).text().trim().to_string();
+        if m.is_empty() {
+            self.show_toast(self.lang.t("Enter a URL match first").to_string(), cx);
+            return;
+        }
+        let to = self.map_to.read(cx).text().trim().to_string();
+        let action = match self.map_kind {
+            1 => {
+                if to.is_empty() {
+                    self.show_toast(self.lang.t("Enter a local file path").to_string(), cx);
+                    return;
+                }
+                MapAction::Local { file: to }
+            }
+            2 => {
+                let status = self
+                    .map_status
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .parse::<u16>()
+                    .unwrap_or(200);
+                let body = self.map_body.read(cx).text().to_string();
+                let content_type = if to.is_empty() {
+                    "application/json; charset=utf-8".to_string()
+                } else {
+                    to
+                };
+                MapAction::Mock {
+                    status,
+                    content_type,
+                    body,
+                }
+            }
+            _ => {
+                if to.is_empty() {
+                    self.show_toast(self.lang.t("Enter a target host[:port]").to_string(), cx);
+                    return;
+                }
+                let (to_host, to_port) = match to.rsplit_once(':') {
+                    Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(0)),
+                    None => (to, 0),
+                };
+                MapAction::Remote { to_host, to_port }
+            }
+        };
+        self.map_rules.push(MapRule {
+            enabled: true,
+            cond: Condition {
+                field: Field::Url,
+                op: Op::Contains,
+                value: m,
+                negate: false,
+            },
+            action,
+        });
+        self.map_match.update(cx, |s, cx| s.set_text(String::new(), cx));
+        self.map_to.update(cx, |s, cx| s.set_text(String::new(), cx));
+        self.map_body.update(cx, |s, cx| s.set_text(String::new(), cx));
+        self.sync_rules_to_engine();
+        cx.notify();
+    }
+
+    pub fn remove_map_rule(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.map_rules.len() {
+            self.map_rules.remove(idx);
+            self.sync_rules_to_engine();
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_map_rule(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(r) = self.map_rules.get_mut(idx) {
+            r.enabled = !r.enabled;
+            self.sync_rules_to_engine();
+            cx.notify();
+        }
+    }
+
     // ── 右键快捷(代理历史行 → 范围规则)──
 
     /// 仅拦截某 Host(添加 include 范围规则 + 打开请求拦截开关)。
@@ -538,6 +621,35 @@ impl ScryApp {
     // ── UI:Options 页(规则总览 + 新增表单)──
 
     /// Proxy → Options 页主体:自定义拦截范围卡 + Match & Replace 卡(对标 Burp Proxy options)。
+    /// 新增一条 WS 改帧规则(空查找忽略),持久化。
+    pub fn add_ws_rule(&mut self, cx: &mut Context<Self>) {
+        let find = self.ws_rule_find.read(cx).text().trim().to_string();
+        if find.is_empty() {
+            self.show_toast(self.lang.t("Enter find text first").to_string(), cx);
+            return;
+        }
+        let replace = self.ws_rule_replace.read(cx).text().to_string();
+        let dir = if self.ws_rule_to_server {
+            scry_proxy::websocket::WsRuleDir::ToServer
+        } else {
+            scry_proxy::websocket::WsRuleDir::ToClient
+        };
+        self.ws_rules.push(scry_proxy::websocket::WsRewriteRule { dir, find, replace });
+        self.ws_rule_find.update(cx, |s, cx| s.set_text(String::new(), cx));
+        self.ws_rule_replace.update(cx, |s, cx| s.set_text(String::new(), cx));
+        crate::rules::save_ws_rules(&self.ws_rules);
+        cx.notify();
+    }
+
+    /// 删除第 `i` 条 WS 改帧规则,持久化。
+    pub fn remove_ws_rule(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.ws_rules.len() {
+            self.ws_rules.remove(i);
+            crate::rules::save_ws_rules(&self.ws_rules);
+            cx.notify();
+        }
+    }
+
     pub fn options_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let c = cx.theme().colors;
         let t = cx.theme().tokens;
@@ -561,6 +673,97 @@ impl ScryApp {
             .child(intro)
             .child(self.scope_rules_card(cx))
             .child(self.replace_rules_card(cx))
+            .child(self.map_rules_card(cx))
+            .child(self.ws_rules_card(cx))
+    }
+
+    /// 「WebSocket 改帧」卡:规则列表 + 新增表单(对标 Burp WebSockets intercept)。
+    fn ws_rules_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = cx.theme().colors;
+        let t = cx.theme().tokens;
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (i, r) in self.ws_rules.iter().enumerate() {
+            let (dir_txt, dir_col) = match r.dir {
+                scry_proxy::websocket::WsRuleDir::ToServer => (self.lang.t("→ Server"), c.accent),
+                scry_proxy::websocket::WsRuleDir::ToClient => (self.lang.t("→ Client"), c.primary),
+            };
+            let rule_txt = format!("\"{}\"  →  \"{}\"", r.find, r.replace);
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.sm)
+                    .py(px(3.0))
+                    .child(Badge::new(dir_txt, dir_col))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(t.font_size.xs)
+                            .text_color(c.text)
+                            .child(rule_txt),
+                    )
+                    .child(
+                        IconButton::new(("ws-del", i), IconName::Trash).ghost().on_click(
+                            cx.listener(move |this, _e, _w, cx| this.remove_ws_rule(i, cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let list: AnyElement = if rows.is_empty() {
+            div()
+                .text_size(t.font_size.sm)
+                .text_color(c.text_subtle)
+                .child(self.lang.t(
+                    "No rules — rewrite live WebSocket text frames (e.g. tamper a chat / game message). Literal find → replace, per direction.",
+                ))
+                .into_any_element()
+        } else {
+            div().flex().flex_col().children(rows).into_any_element()
+        };
+
+        // 方向分段(→ Server / → Client)。
+        let vd = cx.entity();
+        let dir_seg = Segmented::new("ws-dir")
+            .items([self.lang.t("→ Server"), self.lang.t("→ Client")])
+            .selected(if self.ws_rule_to_server { 0 } else { 1 })
+            .on_select(move |i, _e, _w, app| {
+                vd.update(app, |this, cx| {
+                    this.ws_rule_to_server = i == 0;
+                    cx.notify();
+                });
+            });
+
+        let form = div()
+            .flex()
+            .items_center()
+            .gap(t.space.sm)
+            .child(dir_seg)
+            .child(div().flex_1().min_w(px(60.0)).child(self.ws_rule_find.clone()))
+            .child(Icon::new(IconName::ChevronRight).size(px(14.0)).color(c.text_subtle))
+            .child(div().flex_1().min_w(px(60.0)).child(self.ws_rule_replace.clone()))
+            .child(
+                Button::new("ws-add", self.lang.t("Add rule"))
+                    .size(ButtonSize::Sm)
+                    .icon(IconName::Plus)
+                    .on_click(cx.listener(|this, _e, _w, cx| this.add_ws_rule(cx))),
+            );
+
+        card(c, t)
+            .child(section_label(self.lang.t("WebSocket frames"), c, t))
+            .child(
+                div()
+                    .text_size(t.font_size.xs)
+                    .text_color(c.text_subtle)
+                    .child(self.lang.t("Rewrite live WS text frames. Takes effect on next capture start.")),
+            )
+            .child(list)
+            .child(divider(c))
+            .child(form)
     }
 
     /// 「自定义拦截范围」卡:规则列表 + 新增表单。
@@ -908,6 +1111,168 @@ impl ScryApp {
             );
 
         div().flex().flex_col().gap(t.space.sm).child(row1).child(row2)
+    }
+
+    /// 「Map Local / Map Remote / Mock」卡:规则列表 + 新增表单。
+    fn map_rules_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = cx.theme().colors;
+        let t = cx.theme().tokens;
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (i, r) in self.map_rules.iter().enumerate() {
+            let enabled = r.enabled;
+            let (kind_txt, kind_color, desc) = match &r.action {
+                MapAction::Remote { to_host, to_port } => (
+                    self.lang.t("Map Remote"),
+                    c.accent,
+                    if *to_port == 0 {
+                        to_host.clone()
+                    } else {
+                        format!("{to_host}:{to_port}")
+                    },
+                ),
+                MapAction::Local { file } => (self.lang.t("Map Local"), c.success, file.clone()),
+                MapAction::Mock { status, .. } => {
+                    (self.lang.t("Mock"), c.warning, format!("HTTP {status}"))
+                }
+            };
+            let rule_txt = format!("{}  →  {desc}", r.cond.value);
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.sm)
+                    .py(px(3.0))
+                    .child(Switch::new(("map-en", i), enabled).on_toggle(
+                        cx.listener(move |this, _e, _w, cx| this.toggle_map_rule(i, cx)),
+                    ))
+                    .child(Badge::new(kind_txt, kind_color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(t.font_size.xs)
+                            .text_color(if enabled { c.text } else { c.text_subtle })
+                            .child(rule_txt),
+                    )
+                    .child(
+                        IconButton::new(("map-del", i), IconName::Trash).ghost().on_click(
+                            cx.listener(move |this, _e, _w, cx| this.remove_map_rule(i, cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let list: AnyElement = if rows.is_empty() {
+            div()
+                .text_size(t.font_size.sm)
+                .text_color(c.text_subtle)
+                .child(self.lang.t(
+                    "No rules — redirect a host (Map Remote), serve a local file (Map Local), or return a canned response (Mock).",
+                ))
+                .into_any_element()
+        } else {
+            div().flex().flex_col().children(rows).into_any_element()
+        };
+
+        card(c, t)
+            .child(section_label(self.lang.t("Map & Mock"), c, t))
+            .child(list)
+            .child(divider(c))
+            .child(self.map_form(cx))
+    }
+
+    /// Map / Mock 新增表单(类型分段 + 匹配 + 目标[+ Mock 状态/体])。
+    fn map_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = cx.theme().colors;
+        let t = cx.theme().tokens;
+
+        // 动作类型:Map Remote / Map Local / Mock。
+        let vk = cx.entity();
+        let kind_seg = Segmented::new("map-kind")
+            .items([
+                self.lang.t("Map Remote"),
+                self.lang.t("Map Local"),
+                self.lang.t("Mock"),
+            ])
+            .selected(self.map_kind)
+            .on_select(move |i, _e, _w, app| {
+                vk.update(app, |this, cx| {
+                    this.map_kind = i;
+                    cx.notify();
+                });
+            });
+
+        let to_hint = match self.map_kind {
+            1 => self.lang.t("Local file"),
+            2 => self.lang.t("Content-Type"),
+            _ => self.lang.t("Target host[:port]"),
+        };
+
+        let row1 = div()
+            .flex()
+            .items_center()
+            .gap(t.space.sm)
+            .child(
+                div()
+                    .text_size(t.font_size.xs)
+                    .text_color(c.text_subtle)
+                    .child(self.lang.t("Action")),
+            )
+            .child(kind_seg);
+
+        let row2 = div()
+            .flex()
+            .items_center()
+            .gap(t.space.sm)
+            .child(div().flex_1().min_w(px(80.0)).child(self.map_match.clone()))
+            .child(Icon::new(IconName::ChevronRight).size(px(14.0)).color(c.text_subtle))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(80.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(t.font_size.xs)
+                            .text_color(c.text_subtle)
+                            .child(to_hint),
+                    )
+                    .child(self.map_to.clone()),
+            );
+
+        let mut form = div().flex().flex_col().gap(t.space.sm).child(row1).child(row2);
+
+        // Mock:额外的状态码 + 响应体。
+        if self.map_kind == 2 {
+            form = form
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(t.space.sm)
+                        .child(
+                            div()
+                                .text_size(t.font_size.xs)
+                                .text_color(c.text_subtle)
+                                .child(self.lang.t("Status")),
+                        )
+                        .child(div().w(px(80.0)).child(self.map_status.clone())),
+                )
+                .child(div().h(px(72.0)).child(self.map_body.clone()));
+        }
+
+        let add_btn = Button::new("map-add", self.lang.t("Add rule"))
+            .variant(ButtonVariant::Primary)
+            .size(ButtonSize::Sm)
+            .icon(IconName::Plus)
+            .on_click(cx.listener(|this, _e, _w, cx| this.add_map_rule(cx)));
+
+        form.child(div().flex().justify_end().child(add_btn))
     }
 }
 

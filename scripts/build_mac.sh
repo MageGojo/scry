@@ -18,18 +18,18 @@ DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"
 
-echo "==> [1/5] 编译 release(opt-level=z + lto,首次较慢)"
+echo "==> [1/6] 编译 release(opt-level=z + lto,首次较慢)"
 ( cd "$ROOT" && cargo build --release -p "$BIN_NAME" )
 BIN="$ROOT/target/release/$BIN_NAME"
 [ -f "$BIN" ] || { echo "找不到二进制:$BIN"; exit 1; }
 
-echo "==> [2/5] 组装 $APP_NAME.app 目录结构"
+echo "==> [2/6] 组装 $APP_NAME.app 目录结构"
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/icons"
 cp "$BIN" "$CONTENTS/MacOS/$BIN_NAME"
 chmod +x "$CONTENTS/MacOS/$BIN_NAME"
 
-echo "==> [3/5] 拷入自带资源(界面 SVG 图标 + 应用图标)"
+echo "==> [3/6] 拷入自带资源(界面 SVG 图标 + 应用图标)"
 if [ -d "$ICONS_SRC" ]; then
   cp "$ICONS_SRC"/*.svg "$CONTENTS/Resources/icons/" 2>/dev/null || true
   echo "    UI icons: $(ls "$CONTENTS/Resources/icons" | wc -l | tr -d ' ') 个"
@@ -49,7 +49,34 @@ else
   echo "    警告:未找到 $APP_ICNS(Dock/Finder 将显示默认空白图标)"
 fi
 
-echo "==> [4/5] 写 Info.plist"
+# 内置浏览器(T1 抓网站零配置):把 Chrome for Testing 打进 .app,实现真·离线零环境。
+# 默认不打(省 ~200MB + 加快构建);需要离线交付时:SCRY_BUNDLE_CHROMIUM=1 ./scripts/build_mac.sh
+# 不打包也没关系:App 内「抓网站」卡在目标机首次会提示一键下载到 ~/.scry/chromium/。
+echo "==> [4/6] 内置 Chrome for Testing(可选)"
+if [ "${SCRY_BUNDLE_CHROMIUM:-0}" = "1" ]; then
+  CHROMIUM_DIR="$CONTENTS/Resources/chromium"
+  mkdir -p "$CHROMIUM_DIR"
+  ARCH="$(uname -m)"; [ "$ARCH" = "arm64" ] && PLAT="mac-arm64" || PLAT="mac-x64"
+  echo "    平台 $PLAT,解析下载地址…"
+  URL="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
+    | python3 -c "import sys,json;d=json.load(sys.stdin);print(next(x['url'] for x in d['channels']['Stable']['downloads']['chrome'] if x['platform']=='$PLAT'))" 2>/dev/null || true)"
+  if [ -n "$URL" ]; then
+    echo "    下载 $URL"
+    if curl -fL --retry 3 -o "$CHROMIUM_DIR/chrome.zip" "$URL"; then
+      ditto -x -k "$CHROMIUM_DIR/chrome.zip" "$CHROMIUM_DIR" && rm -f "$CHROMIUM_DIR/chrome.zip"
+      xattr -dr com.apple.quarantine "$CHROMIUM_DIR" 2>/dev/null || true
+      echo "    ✓ Chrome for Testing 已打包进 .app($PLAT)"
+    else
+      echo "    警告:下载失败,跳过打包(运行时仍可在 App 内『下载内置浏览器』)"
+    fi
+  else
+    echo "    警告:解析下载地址失败(无 python3 / 无网络?),跳过打包"
+  fi
+else
+  echo "    跳过(默认);真·离线零环境交付请: SCRY_BUNDLE_CHROMIUM=1 ./scripts/build_mac.sh"
+fi
+
+echo "==> [5/6] 写 Info.plist"
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -70,7 +97,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> [5/5] ad-hoc 代码签名 + 打包 zip"
+echo "==> [6/6] ad-hoc 代码签名 + 打包 zip"
 codesign --force --deep --sign - "$APP" 2>/dev/null && echo "    已 ad-hoc 签名" || echo "    codesign 跳过(本机无 codesign?)"
 ( cd "$DIST" && ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME-macos.zip" )
 

@@ -15,6 +15,12 @@ scry_ca = { workspace = true }
 scry_sniff = { workspace = true }
 scry_decode = { workspace = true }
 scry_scan = { workspace = true }
+scry_oob = { workspace = true }
+scry_nuclei = { workspace = true }
+scry_session = { workspace = true }
+scry_httpql = { workspace = true }
+scry_jwt = { workspace = true }
+scry_graphql = { workspace = true }
 scry_sqli = { workspace = true }
 scry_xss = { workspace = true }
 scry_seq = { workspace = true }

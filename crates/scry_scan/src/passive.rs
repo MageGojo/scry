@@ -198,28 +198,54 @@ fn rule_cors(f: &HttpFlow, out: &mut Vec<Finding>) {
     let Some(acao) = f.resp_header("access-control-allow-origin") else {
         return;
     };
-    if acao.trim() != "*" {
-        return;
-    }
+    let acao = acao.trim();
     let creds = f
         .resp_header("access-control-allow-credentials")
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if creds {
+
+    if acao == "*" {
+        if creds {
+            out.push(Finding::new(
+                "cors-wildcard-credentials",
+                "CORS wildcard with credentials",
+                Severity::High,
+                f.url(),
+                "Access-Control-Allow-Origin: * together with Allow-Credentials: true",
+            ));
+        } else {
+            out.push(Finding::new(
+                "cors-wildcard",
+                "CORS allows any origin",
+                Severity::Low,
+                f.url(),
+                "Access-Control-Allow-Origin: *",
+            ));
+        }
+        return;
+    }
+
+    // 反射 Origin:ACAO 原样回显请求 Origin + 凭据 → 任意站点可带凭据读响应(比通配更危险)。
+    if let Some(origin) = f.req_header("origin") {
+        let origin = origin.trim();
+        if !origin.is_empty() && acao.eq_ignore_ascii_case(origin) && creds {
+            out.push(Finding::new(
+                "cors-reflected-origin",
+                "CORS reflects arbitrary origin with credentials",
+                Severity::High,
+                f.url(),
+                format!("ACAO reflects request Origin '{origin}' with Allow-Credentials: true"),
+            ));
+        }
+    }
+    // null 源 + 凭据:沙箱 iframe / 重定向可伪造 null Origin 绕过。
+    if acao.eq_ignore_ascii_case("null") && creds {
         out.push(Finding::new(
-            "cors-wildcard-credentials",
-            "CORS wildcard with credentials",
-            Severity::High,
+            "cors-null-origin",
+            "CORS allows null origin with credentials",
+            Severity::Medium,
             f.url(),
-            "Access-Control-Allow-Origin: * together with Allow-Credentials: true",
-        ));
-    } else {
-        out.push(Finding::new(
-            "cors-wildcard",
-            "CORS allows any origin",
-            Severity::Low,
-            f.url(),
-            "Access-Control-Allow-Origin: *",
+            "Access-Control-Allow-Origin: null with Allow-Credentials: true",
         ));
     }
 }
@@ -343,6 +369,104 @@ fn rule_body_signals(f: &HttpFlow, out: &mut Vec<Finding>) {
             }
         }
     }
+
+    // 混合内容:HTTPS 页面引用 http:// 子资源(script/img/iframe);`http://` 不会误命中 `https://`。
+    if f.scheme == "https"
+        && is_html(f)
+        && (low.contains("src=\"http://") || low.contains("src='http://"))
+    {
+        out.push(Finding::new(
+            "mixed-content",
+            "Mixed content over HTTPS",
+            Severity::Low,
+            f.url(),
+            "HTTPS page references http:// sub-resources (script/img/iframe)",
+        ));
+    }
+
+    // 响应体里的高置信度密钥 / 令牌 / 私钥块泄露。
+    rule_secrets(&text, &f.url(), out);
+}
+
+// ── 敏感信息(密钥 / 令牌)检测:固定前缀 + 字符集 + 最小长度,低误报,无需 regex ──
+
+fn ascii_alnum(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+fn aws_charset(b: u8) -> bool {
+    b.is_ascii_uppercase() || b.is_ascii_digit()
+}
+fn google_charset(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+fn slack_charset(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-'
+}
+
+/// 高置信度密钥规则(前缀 + 字符集 + 最小尾随长度)。
+struct SecretRule {
+    id: &'static str,
+    title: &'static str,
+    sev: Severity,
+    prefix: &'static str,
+    min: usize,
+    ch: fn(u8) -> bool,
+}
+
+const SECRET_RULES: &[SecretRule] = &[
+    SecretRule { id: "secret-aws-akid", title: "AWS access key ID exposed", sev: Severity::High, prefix: "AKIA", min: 16, ch: aws_charset },
+    SecretRule { id: "secret-google-api", title: "Google API key exposed", sev: Severity::High, prefix: "AIza", min: 35, ch: google_charset },
+    SecretRule { id: "secret-github-token", title: "GitHub token exposed", sev: Severity::High, prefix: "ghp_", min: 36, ch: ascii_alnum },
+    SecretRule { id: "secret-slack-token", title: "Slack token exposed", sev: Severity::High, prefix: "xoxb-", min: 10, ch: slack_charset },
+    SecretRule { id: "secret-stripe-key", title: "Stripe live secret key exposed", sev: Severity::Critical, prefix: "sk_live_", min: 16, ch: ascii_alnum },
+];
+
+/// 在文本里找「前缀 + ≥min 个属于 charset 的字符」;命中返回脱敏样本(前缀 + 前 6 字符 + …)。
+fn find_secret(text: &str, prefix: &str, min: usize, ch: fn(u8) -> bool) -> Option<String> {
+    let bytes = text.as_bytes();
+    let pb = prefix.as_bytes();
+    if pb.is_empty() || bytes.len() < pb.len() {
+        return None;
+    }
+    let mut i = 0;
+    while i + pb.len() <= bytes.len() {
+        if &bytes[i..i + pb.len()] == pb {
+            let mut j = i + pb.len();
+            while j < bytes.len() && ch(bytes[j]) {
+                j += 1;
+            }
+            if j - (i + pb.len()) >= min {
+                let sample_end = (i + pb.len() + 6).min(bytes.len());
+                return Some(format!("{}…", String::from_utf8_lossy(&bytes[i..sample_end])));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 响应体里的密钥泄露(高置信度前缀)+ PEM 私钥块。
+fn rule_secrets(text: &str, url: &str, out: &mut Vec<Finding>) {
+    for r in SECRET_RULES {
+        if let Some(sample) = find_secret(text, r.prefix, r.min, r.ch) {
+            out.push(Finding::new(
+                r.id,
+                r.title,
+                r.sev,
+                url.to_string(),
+                format!("Looks like a leaked credential: {sample}"),
+            ));
+        }
+    }
+    if text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----") {
+        out.push(Finding::new(
+            "secret-private-key",
+            "Private key exposed",
+            Severity::Critical,
+            url.to_string(),
+            "Response body contains a PEM PRIVATE KEY block",
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +562,67 @@ mod tests {
             5,
         );
         assert!(ids(&scan_flow(&f)).contains(&"cors-wildcard-credentials"));
+    }
+
+    #[test]
+    fn cors_reflected_origin_with_creds() {
+        let f = HttpFlow::request(
+            "GET",
+            "https",
+            "ex.com",
+            443,
+            "/api",
+            vec![("Origin".to_string(), "https://evil.example".to_string())],
+            vec![],
+        )
+        .with_response(
+            200,
+            vec![
+                ("Access-Control-Allow-Origin".to_string(), "https://evil.example".to_string()),
+                ("Access-Control-Allow-Credentials".to_string(), "true".to_string()),
+            ],
+            vec![],
+            5,
+        );
+        assert!(ids(&scan_flow(&f)).contains(&"cors-reflected-origin"));
+    }
+
+    #[test]
+    fn secret_leak_and_private_key_in_body() {
+        let f = html_resp(
+            "https",
+            vec![],
+            // 把 sk_live_ 与随机串拆开拼接:运行时仍是完整假 key 让检测规则命中,
+            // 但源文件里不出现连续字面量,避免 GitHub 密钥扫描误把测试样例当真密钥拦推送。
+            concat!("cfg={aws:\"AKIAIOSFODNN7EXAMPLE\", stripe:\"sk_live_", "abcdefghijklmnop1234567890\"}"),
+        );
+        let found = ids(&scan_flow(&f));
+        assert!(found.contains(&"secret-aws-akid"));
+        assert!(found.contains(&"secret-stripe-key"));
+
+        let pk = html_resp(
+            "https",
+            vec![],
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
+        );
+        assert!(ids(&scan_flow(&pk)).contains(&"secret-private-key"));
+    }
+
+    #[test]
+    fn mixed_content_on_https_html() {
+        let f = html_resp(
+            "https",
+            vec![],
+            "<html><script src=\"http://cdn.evil/x.js\"></script></html>",
+        );
+        assert!(ids(&scan_flow(&f)).contains(&"mixed-content"));
+        // https:// 子资源不应误报。
+        let clean = html_resp(
+            "https",
+            vec![],
+            "<html><script src=\"https://cdn.ok/x.js\"></script></html>",
+        );
+        assert!(!ids(&scan_flow(&clean)).contains(&"mixed-content"));
     }
 
     #[test]

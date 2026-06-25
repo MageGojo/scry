@@ -134,6 +134,31 @@ fn decode_content(content: &Value) -> Vec<u8> {
     }
 }
 
+/// 标准 base64 编码(带 `=` 填充)。导出 HAR 时给二进制响应体用。
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// 标准 base64 解码(忽略空白与 `=` 填充);非法字符返回 `None`。
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
@@ -162,6 +187,125 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+// ───────────────────────────── HAR 导出 ─────────────────────────────
+
+/// Unix 毫秒 → ISO8601 UTC 字符串(`2026-06-25T18:03:01.234Z`)。
+///
+/// 不引时间库,手算公历(Howard Hinnant `civil_from_days` 算法),与项目「纯 Rust / 免依赖」风格一致。
+fn iso8601_from_millis(ms: i64) -> String {
+    let ms = ms.max(0);
+    let secs = ms / 1000;
+    let millis = ms % 1000;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    // civil_from_days:从 1970-01-01 的天数还原 (year, month, day)。
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+}
+
+/// 头部列表 → HAR `[{name,value}]`。
+fn headers_to_har(headers: &[Header]) -> Vec<Value> {
+    headers
+        .iter()
+        .map(|(k, v)| serde_json::json!({ "name": k, "value": v }))
+        .collect()
+}
+
+/// 把字节体编码为 HAR content/postData 的文本表示:有效 UTF-8 直接放文本,否则 base64。
+fn body_to_text(body: &[u8]) -> (String, bool) {
+    match std::str::from_utf8(body) {
+        Ok(s) => (s.to_string(), false),
+        Err(_) => (base64_encode(body), true),
+    }
+}
+
+/// 把流量列表序列化为标准 HAR 1.2 JSON 字符串(纯函数,可单测)。
+///
+/// 与 [`parse_har`] 对称:导出再导入应保持 method/url/headers/body/status 一致。
+pub fn flows_to_har(flows: &[HttpFlow]) -> String {
+    let entries: Vec<Value> = flows
+        .iter()
+        .map(|f| {
+            let (req_text, _) = body_to_text(&f.req_body);
+            let post_data = if f.req_body.is_empty() {
+                Value::Null
+            } else {
+                let mime = f
+                    .req_header("content-type")
+                    .unwrap_or("application/octet-stream");
+                serde_json::json!({ "mimeType": mime, "text": req_text })
+            };
+            let (resp_text, resp_b64) = body_to_text(&f.resp_body);
+            let mut content = serde_json::json!({
+                "size": f.resp_body.len(),
+                "mimeType": f.content_type().unwrap_or(""),
+                "text": resp_text,
+            });
+            if resp_b64 {
+                content["encoding"] = Value::from("base64");
+            }
+            serde_json::json!({
+                "startedDateTime": iso8601_from_millis(f.ts),
+                "time": f.duration_ms,
+                "request": {
+                    "method": f.method,
+                    "url": f.url(),
+                    "httpVersion": "HTTP/1.1",
+                    "headers": headers_to_har(&f.req_headers),
+                    "queryString": [],
+                    "cookies": [],
+                    "headersSize": -1,
+                    "bodySize": f.req_body.len(),
+                    "postData": post_data,
+                },
+                "response": {
+                    "status": f.status,
+                    "statusText": crate::model::status_reason(f.status),
+                    "httpVersion": "HTTP/1.1",
+                    "headers": headers_to_har(&f.resp_headers),
+                    "cookies": [],
+                    "content": content,
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": f.resp_body.len(),
+                },
+                "cache": {},
+                "timings": { "send": 0, "wait": f.duration_ms, "receive": 0 },
+            })
+        })
+        .collect();
+
+    let har = serde_json::json!({
+        "log": {
+            "version": "1.2",
+            "creator": { "name": "Scry", "version": env!("CARGO_PKG_VERSION") },
+            "entries": entries,
+        }
+    });
+    serde_json::to_string_pretty(&har).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 把流量写成 `.har` 文件到 `~/.scry/exports/`,返回 (路径, 条数)。阻塞,放后台线程调。
+fn export_har_blocking(flows: &[HttpFlow]) -> Result<(PathBuf, usize)> {
+    let dir = scry_ca::default_ca_dir().join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow!("创建导出目录失败:{e}"))?;
+    let path = dir.join(format!("scry-export-{}.har", now_millis()));
+    std::fs::write(&path, flows_to_har(flows)).map_err(|e| anyhow!("写入失败:{e}"))?;
+    Ok((path, flows.len()))
 }
 
 /// 读取并解析一个 HAR 文件,逐条**先落盘去重**(save-first)。返回 `(新增条数, 解析总数, 文件名)`。
@@ -230,6 +374,56 @@ impl ScryApp {
                             format!("导入失败:{msg}")
                         } else {
                             format!("Import failed: {msg}")
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 把当前会话的全部流量导出为 `.har` 文件(写到 `~/.scry/exports/` 并在访达定位)。
+    pub fn export_har_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.flows.is_empty() {
+            self.cert_msg = Some(if self.lang.is_zh() {
+                "当前没有可导出的流量".to_string()
+            } else {
+                "No flows to export".to_string()
+            });
+            cx.notify();
+            return;
+        }
+        let flows = self.flows.clone();
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = bg
+                .spawn(async move { export_har_blocking(&flows).map_err(|e| format!("{e:#}")) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok((path, n)) => {
+                        let _ = std::process::Command::new("open")
+                            .arg("-R")
+                            .arg(&path)
+                            .spawn();
+                        this.push_log(
+                            LogLevel::Success,
+                            "export",
+                            format!("已导出 {n} 条流量到 {}", path.display()),
+                        );
+                        this.cert_msg = Some(if this.lang.is_zh() {
+                            format!("已导出 {n} 条流量为 HAR")
+                        } else {
+                            format!("Exported {n} flows as HAR")
+                        });
+                    }
+                    Err(msg) => {
+                        this.push_log(LogLevel::Error, "export", format!("导出失败:{msg}"));
+                        this.cert_msg = Some(if this.lang.is_zh() {
+                            format!("导出失败:{msg}")
+                        } else {
+                            format!("Export failed: {msg}")
                         });
                     }
                 }
@@ -313,5 +507,56 @@ mod tests {
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64_decode("").unwrap(), b"");
         assert_eq!(base64_decode("YQ==").unwrap(), b"a");
+    }
+
+    #[test]
+    fn base64_encode_matches_decode() {
+        for s in ["", "a", "ab", "abc", "hello world", "\u{4f60}\u{597d}"] {
+            assert_eq!(base64_decode(&base64_encode(s.as_bytes())).unwrap(), s.as_bytes());
+        }
+        // 已知向量。
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+    }
+
+    #[test]
+    fn iso8601_known_epochs() {
+        assert_eq!(iso8601_from_millis(0), "1970-01-01T00:00:00.000Z");
+        // 1782756181234 ms = 2026-06-29T18:03:01.234Z(date -u -r 1782756181 核对)。
+        assert_eq!(iso8601_from_millis(1_782_756_181_234), "2026-06-29T18:03:01.234Z");
+    }
+
+    #[test]
+    fn export_then_import_roundtrips() {
+        use scry_core::HttpFlow;
+        let flows = vec![
+            HttpFlow::request(
+                "POST",
+                "https",
+                "api.example.com",
+                443,
+                "/login?next=/home",
+                vec![("Content-Type".into(), "application/json".into())],
+                br#"{"u":"bob"}"#.to_vec(),
+            )
+            .with_response(
+                200,
+                vec![("Content-Type".into(), "text/plain".into())],
+                b"hello".to_vec(),
+                42,
+            ),
+            // 二进制响应体 → 应走 base64 编码并能解回。
+            HttpFlow::request("GET", "https", "cdn.example.com", 443, "/i.png", vec![], vec![])
+                .with_response(200, vec![], vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff], 7),
+        ];
+        let har = flows_to_har(&flows);
+        let parsed = parse_har(har.as_bytes()).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].method, "POST");
+        assert_eq!(parsed[0].url(), "https://api.example.com/login?next=/home");
+        assert_eq!(parsed[0].status, 200);
+        assert_eq!(parsed[0].req_body, br#"{"u":"bob"}"#);
+        assert_eq!(parsed[0].resp_body, b"hello");
+        assert_eq!(parsed[1].resp_body, vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
     }
 }

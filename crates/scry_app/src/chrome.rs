@@ -235,18 +235,26 @@ impl ScryApp {
             .children(sessions);
 
         // Tools
-        let tools: [(IconName, &'static str, Option<Tab>); 11] = [
+        let tools: [(IconName, &'static str, Option<Tab>); 19] = [
             (IconName::Filter, "Scope", None),
             (IconName::Layers, "SQLi", Some(Tab::Sqli)),
             (IconName::Tag, "XSS", Some(Tab::Xss)),
             (IconName::Shield, "Authz", Some(Tab::Authz)),
+            (IconName::Folder, "Nuclei", Some(Tab::Nuclei)),
+            (IconName::Power, "Session", Some(Tab::Session)),
             (IconName::GitBranch, "Spider", Some(Tab::Spider)),
+            (IconName::Plus, "Compose", Some(Tab::Compose)),
+            (IconName::Layers, "GraphQL", Some(Tab::Graphql)),
             (IconName::Refresh, "Repeater", Some(Tab::Repeater)),
+            (IconName::Globe, "WS Repeater", Some(Tab::WsRepeater)),
             (IconName::Zap, "Intruder", Some(Tab::Intruder)),
+            (IconName::Clock, "Race", Some(Tab::Race)),
             (IconName::Sort, "Sequencer", Some(Tab::Sequencer)),
             (IconName::Hash, "Decoder", Some(Tab::Decoder)),
+            (IconName::Shield, "JWT", Some(Tab::Jwt)),
             (IconName::Copy, "Comparer", Some(Tab::Comparer)),
             (IconName::Clock, "Logger", Some(Tab::Logger)),
+            (IconName::Sort, "Stats", Some(Tab::Stats)),
         ];
         let mut tool_rows = Vec::new();
         for (icon, label, target) in tools {
@@ -842,13 +850,21 @@ impl ScryApp {
             Tab::Sqli => self.sqli_content(cx).into_any_element(),
             Tab::Xss => self.xss_content(cx).into_any_element(),
             Tab::Authz => self.authz_content(cx).into_any_element(),
+            Tab::Race => self.race_content(cx).into_any_element(),
+            Tab::Nuclei => self.nuclei_content(cx).into_any_element(),
+            Tab::Session => self.session_content(cx).into_any_element(),
             Tab::Spider => self.spider_content(cx).into_any_element(),
+            Tab::Compose => self.compose_content(cx).into_any_element(),
+            Tab::Graphql => self.graphql_content(cx).into_any_element(),
             Tab::Repeater => self.repeater_content(cx).into_any_element(),
+            Tab::WsRepeater => self.ws_repeater_content(cx).into_any_element(),
             Tab::Intruder => self.intruder_content(cx).into_any_element(),
             Tab::Sequencer => self.sequencer_content(cx).into_any_element(),
             Tab::Decoder => self.decoder_content(cx).into_any_element(),
+            Tab::Jwt => self.jwt_content(cx).into_any_element(),
             Tab::Comparer => self.comparer_content(cx).into_any_element(),
             Tab::Logger => self.logger_content(cx).into_any_element(),
+            Tab::Stats => self.stats_content(cx).into_any_element(),
             Tab::Extender => self.extender_content(cx).into_any_element(),
             Tab::Settings => self.settings_content(cx).into_any_element(),
         }
@@ -965,6 +981,20 @@ impl ScryApp {
                         .into_any_element(),
                 );
                 items.push(
+                    MenuItem::new("ctx-send-ws", if zh { "WS 重放" } else { "WS Repeater" })
+                        .icon(IconName::Globe)
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            if let Some(f) = this.flows.get(idx).cloned() {
+                                this.fill_ws_from_flow(&f, cx);
+                                this.selected = Some(idx);
+                                this.tab = Tab::WsRepeater;
+                            }
+                            this.ctx_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
                     MenuItem::new("ctx-send-int", self.lang.t("Intruder"))
                         .icon(IconName::Zap)
                         .on_click(cx.listener(move |this, _e, _w, cx| {
@@ -1014,6 +1044,76 @@ impl ScryApp {
                                 this.fill_authz_from_flow(&f, cx);
                                 this.selected = Some(idx);
                                 this.tab = Tab::Authz;
+                            }
+                            this.ctx_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    MenuItem::new("ctx-send-nuclei", self.lang.t("Nuclei"))
+                        .icon(IconName::Folder)
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            if let Some(f) = this.flows.get(idx).cloned() {
+                                this.fill_nuclei_from_flow(&f, cx);
+                                this.selected = Some(idx);
+                                this.tab = Tab::Nuclei;
+                            }
+                            this.ctx_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    MenuItem::new("ctx-send-race", self.lang.t("Race"))
+                        .icon(IconName::Clock)
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            if let Some(f) = this.flows.get(idx).cloned() {
+                                this.fill_race_from_flow(&f, cx);
+                                this.selected = Some(idx);
+                                this.tab = Tab::Race;
+                            }
+                            this.ctx_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    MenuItem::new("ctx-send-jwt", "JWT")
+                        .icon(IconName::Shield)
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            if let Some(f) = this.flows.get(idx).cloned() {
+                                this.fill_jwt_from_flow(&f, cx);
+                                this.selected = Some(idx);
+                                this.tab = Tab::Jwt;
+                            }
+                            this.ctx_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    MenuItem::new("ctx-send-compose", self.lang.t("Compose"))
+                        .icon(IconName::Plus)
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            if let Some(f) = this.flows.get(idx).cloned() {
+                                this.fill_compose_from_flow(&f, cx);
+                                this.selected = Some(idx);
+                                this.tab = Tab::Compose;
+                            }
+                            this.ctx_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    MenuItem::new("ctx-send-graphql", "GraphQL")
+                        .icon(IconName::Layers)
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            if let Some(f) = this.flows.get(idx).cloned() {
+                                this.fill_graphql_from_flow(&f, cx);
+                                this.selected = Some(idx);
+                                this.tab = Tab::Graphql;
                             }
                             this.ctx_menu = None;
                             cx.notify();
@@ -1171,9 +1271,10 @@ impl ScryApp {
         ty: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 「发送到」二级在 (tx+TOP_W-8, ty);「比较器」是其第 5 项(前 5 项 + 1 分隔)。
+        // 「发送到」二级在 (tx+TOP_W-8, ty);「比较器」在它下面(前 11 项 Repeater/WS Repeater/
+        // Intruder/SQLi/XSS/Authz/Nuclei/Race/JWT/Compose/GraphQL + 1 分隔之后)。
         let sx = tx + px(Self::CTX_TOP_W - 8.0) + px(Self::CTX_SUB_W - 8.0);
-        let sy = ty + px(5.0 * Self::CTX_STEP + 9.0);
+        let sy = ty + px(11.0 * Self::CTX_STEP + 9.0);
         let zh = self.lang.is_zh();
         let mut items: Vec<AnyElement> = Vec::new();
         for (id, label_zh, label_en, is_req, to_a) in [
@@ -1258,6 +1359,8 @@ impl Render for ScryApp {
             Tab::Repeater => self.sync_repeater_views(cx),
             Tab::Intruder => self.sync_intruder_views(cx),
             Tab::Decoder => self.sync_decoder_view(cx),
+            Tab::Compose => self.sync_compose_view(cx),
+            Tab::Graphql => self.sync_graphql_view(cx),
             _ => {}
         }
 

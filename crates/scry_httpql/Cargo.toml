@@ -1,0 +1,10 @@
+[package]
+name = "scry_httpql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Scry HTTPQL:对捕获流量的查询语言(对标 Caido),字段子句 + 布尔组合 + 全文(纯函数内核)"
+
+[dependencies]
+regex = { workspace = true }

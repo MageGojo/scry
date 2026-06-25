@@ -1,0 +1,16 @@
+[package]
+name = "scry_session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Scry 会话处理:登录宏 + 会话/令牌捕获注入 + 登出检测(authenticated 扫描刚需,纯函数内核)"
+
+[dependencies]
+scry_core = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+# 端到端冒烟:用真实 replay::send 跑登录宏 → 捕获 cookie → 注入到后续请求验证已认证。
+scry_proxy = { workspace = true }
+tokio = { workspace = true }

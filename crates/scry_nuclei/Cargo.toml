@@ -1,0 +1,18 @@
+[package]
+name = "scry_nuclei"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Scry nuclei 式 YAML 模板引擎:解析社区模板子集 + matchers/extractors/DSL(纯函数内核)"
+
+[dependencies]
+scry_core = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+# 端到端冒烟:用真实 replay::send 打一个本地 mock 站点,验证「构造请求 → 匹配 → 提取」整条链路。
+scry_proxy = { workspace = true }
+tokio = { workspace = true }

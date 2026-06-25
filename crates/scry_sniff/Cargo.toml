@@ -8,6 +8,8 @@ description = "Scry 内核被动抓包(libpcap/BPF,类 Wireshark):TCP 重组 + H
 [dependencies]
 scry_core = { workspace = true }
 scry_storage = { workspace = true }
+# QUIC(HTTP/3)Initial 解密(被动取 SNI/ALPN);纯算法轻量 crate,不引入代理引擎重依赖。
+scry_quic = { workspace = true }
 pcap = { workspace = true }
 etherparse = { workspace = true }
 httparse = { workspace = true }

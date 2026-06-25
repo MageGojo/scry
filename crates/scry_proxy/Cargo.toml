@@ -10,6 +10,8 @@ scry_core = { workspace = true }
 scry_storage = { workspace = true }
 scry_ca = { workspace = true }
 scry_ext_api = { workspace = true }
+# QUIC(HTTP/3)被动可见性内核(纯算法独立 crate);lib.rs re-export 为 scry_proxy::quic。
+scry_quic = { workspace = true }
 tokio = { workspace = true }
 httparse = { workspace = true }
 anyhow = { workspace = true }
@@ -21,6 +23,8 @@ rustls-pemfile = { workspace = true }
 webpki-roots = { workspace = true }
 md-5 = { workspace = true }
 sha2 = { workspace = true }
+# WebSocket 握手 Sec-WebSocket-Accept 校验(WS 重放客户端)。
+sha1 = { workspace = true }
 h2 = "0.4.15"
 http = "1.4.2"
 bytes.workspace = true

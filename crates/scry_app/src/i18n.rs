@@ -267,6 +267,9 @@ impl Lang {
             "All hosts" => "全部 host".into(),
             "Pause" => "暂停".into(),
             "Resume" => "继续".into(),
+            // OOB 带外检测(interactsh)
+            "OOB blind scan" => "带外盲扫".into(),
+            "Stop OOB" => "停止带外".into(),
             // 站点爬虫(Spider)
             "Spider" => "爬虫".into(),
             "Crawl" => "爬取".into(),
@@ -300,14 +303,43 @@ impl Lang {
             "Sensitive data in URL query" => "URL 查询串含敏感数据".into(),
             "HTTP Basic auth over plaintext" => "明文 HTTP 上的 Basic 认证".into(),
             "Verbose error / stack trace" => "详细报错 / 栈回溯泄露".into(),
+            "CORS reflects arbitrary origin with credentials" => "CORS 反射任意源且携带凭据".into(),
+            "CORS allows null origin with credentials" => "CORS 允许 null 源且携带凭据".into(),
+            "Mixed content over HTTPS" => "HTTPS 页面混合不安全内容".into(),
+            "AWS access key ID exposed" => "AWS Access Key ID 泄露".into(),
+            "Google API key exposed" => "Google API Key 泄露".into(),
+            "GitHub token exposed" => "GitHub 令牌泄露".into(),
+            "Slack token exposed" => "Slack 令牌泄露".into(),
+            "Stripe live secret key exposed" => "Stripe 生产密钥泄露".into(),
+            "Private key exposed" => "私钥泄露".into(),
+            "Param miner" => "参数挖掘".into(),
+            "Hidden parameter discovered" => "发现隐藏参数".into(),
+            "Request smuggling" => "请求走私".into(),
+            "Possible HTTP request smuggling (timing)" => "疑似 HTTP 请求走私(计时)".into(),
             "Directory listing exposed" => "目录列表暴露".into(),
             "Reflected parameter in response" => "参数在响应中被反射".into(),
             "SQL injection (error-based)" => "SQL 注入(报错型)".into(),
             "Reflected XSS" => "反射型 XSS".into(),
             "Reflected value (non-HTML)" => "参数被反射(非 HTML 上下文)".into(),
             "Path traversal / LFI" => "路径穿越 / 本地文件包含".into(),
+            "Server-side template injection (SSTI)" => "服务端模板注入(SSTI)".into(),
+            "OS command injection" => "操作系统命令注入".into(),
+            "CRLF / response header injection" => "CRLF / 响应头注入".into(),
+            "Open redirect" => "开放重定向".into(),
+            "SSRF (cloud metadata)" => "SSRF(云元数据)".into(),
+            "XXE external entity (file disclosure)" => "XXE 外部实体(文件泄露)".into(),
+            "LDAP injection" => "LDAP 注入".into(),
+            "XPath injection" => "XPath 注入".into(),
+            "Server-side includes (SSI) injection" => "服务端包含(SSI)注入".into(),
+            "Host header injection" => "主机头注入".into(),
             "Unauthenticated access to protected resource" => "未认证即可访问受保护资源".into(),
             "Broken access control (privilege escalation)" => "越权访问(权限提升)".into(),
+            // OOB 带外盲注确认发现标题
+            "Blind SSRF (out-of-band)" => "盲 SSRF(带外确认)".into(),
+            "Blind OS command injection (out-of-band)" => "盲 OS 命令注入(带外确认)".into(),
+            "Blind SQL injection (out-of-band)" => "盲 SQL 注入(带外确认)".into(),
+            "Blind XXE (out-of-band)" => "盲 XXE(带外确认)".into(),
+            "Blind / stored XSS (out-of-band)" => "盲打 / 存储型 XSS(带外确认)".into(),
             // 敏感文件 / 路径扫描(Nikto 式)发现标题
             "Exposed Git repository" => "Git 仓库泄露".into(),
             "Exposed SVN repository" => "SVN 仓库泄露".into(),
@@ -389,6 +421,9 @@ impl Lang {
             "DBMS" => "数据库".into(),
             "Techniques" => "注入技术".into(),
             "Boundary" => "闭合边界".into(),
+            "Dump schema" => "枚举库表".into(),
+            "Tables" => "表".into(),
+            "rows" => "行".into(),
             "Configure a request and start testing" => "配置请求后开始测试".into(),
             "Only test targets you are authorized to assess." => {
                 "仅测试你已获授权的目标。".into()
@@ -409,6 +444,9 @@ impl Lang {
             "Static check" => "静态检测".into(),
             "Live browser" => "浏览器真执行".into(),
             "Live execution" => "浏览器执行确认".into(),
+            "Stored" => "存储型".into(),
+            "Stored XSS" => "存储型 XSS".into(),
+            "Stored (encoded)" => "已存储(已编码)".into(),
             "HTML text" => "HTML 文本".into(),
             "Attribute (double-quoted)" => "属性(双引号)".into(),
             "Attribute (single-quoted)" => "属性(单引号)".into(),
@@ -419,6 +457,8 @@ impl Lang {
             // 越权 / 访问控制(Authz · Autorize 式)页
             "Authz" => "越权".into(),
             "Send to Authz" => "发送到越权".into(),
+            "WS Repeater" => "WS 重放".into(),
+            "Export report" => "导出报告".into(),
             "Access control test" => "越权 / 访问控制测试".into(),
             "Access control" => "访问控制".into(),
             "Access control enforced" => "访问控制到位".into(),
@@ -442,6 +482,25 @@ impl Lang {
             "Baseline" => "基准".into(),
             "No access control issues" => "未发现越权问题".into(),
             "Configure identities and start testing" => "配置身份后开始测试".into(),
+            // 竞态 / single-packet(Race)
+            "Race" => "竞态".into(),
+            "Race / single-packet" => "竞态 / 单包攻击".into(),
+            "Send group" => "并发发送".into(),
+            "Requests" => "路数".into(),
+            "Mode" => "模式".into(),
+            "Last-byte sync" => "最后字节同步".into(),
+            "Parallel" => "并行".into(),
+            "Send to Race" => "发送到竞态".into(),
+            "Possible race condition" => "疑似竞态".into(),
+            "Responses consistent" => "响应一致".into(),
+            "OK" => "成功".into(),
+            "Errors" => "出错".into(),
+            "Sync window" => "同步窗口".into(),
+            "No responses" => "无响应".into(),
+            "Set count and send the group" => "设置路数后并发发送".into(),
+            "Fires N identical requests at once (last-byte sync). Diverging responses suggest a race condition — confirm manually. Authorized targets only." => {
+                "同时发出 N 个相同请求(最后字节同步)。响应出现差异 = 疑似竞态,需人工确认。仅限已授权目标。".into()
+            }
             // 爆破:载荷生成器 / 处理器 / 导出
             "List" => "列表".into(),
             "Numbers" => "数字".into(),
@@ -530,6 +589,18 @@ impl Lang {
             "Unicode escape" => "Unicode 转义".into(),
             "Unicode unescape" => "Unicode 反转义".into(),
             "JWT decode" => "JWT 解析".into(),
+            "Protobuf / gRPC decode" => "Protobuf / gRPC 解码".into(),
+            // 响应渲染预览(Render)
+            "Preview failed" => "预览失败".into(),
+            "HTML preview: switch to Pretty / Raw to read the source (full rendering needs a browser)." => {
+                "HTML 预览:切到「美化 / 原始」查看源码(完整渲染需浏览器)。".into()
+            }
+            "SVG is text — view it under Pretty / Raw." => {
+                "SVG 是文本 —— 在「美化 / 原始」中查看。".into()
+            }
+            "No visual preview for this content type. Use Pretty / Raw / Hex." => {
+                "该内容类型无可视预览,请用「美化 / 原始 / 十六进制」。".into()
+            }
             // 解码器:对称加解密 / MAC + 分组标签
             "Encrypt / Decrypt (key)" => "加密 / 解密(需密钥)".into(),
             "Hash / MAC (one-way)" => "哈希 / MAC(单向)".into(),
@@ -595,6 +666,9 @@ impl Lang {
             "Launch browser capture" => "启动浏览器抓包".into(),
             "Close browser" => "关闭浏览器".into(),
             "Built-in browser running" => "内置浏览器运行中".into(),
+            "No Chrome/Chromium found — download a built-in one for one-click capture" => "未检测到 Chrome/Chromium —— 下载一个内置浏览器即可一键抓包".into(),
+            "Download built-in browser (~150MB)" => "下载内置浏览器(约 150MB)".into(),
+            "Downloading built-in browser…" => "正在下载内置浏览器…".into(),
             "Capture a program / command" => "抓程序 / 命令".into(),
             "Launches it with proxy + CA injected (curl, Electron, Java, Python, Node…)" => {
                 "拉起它并注入代理 + CA 信任(curl、Electron、Java、Python、Node…)".into()
@@ -616,6 +690,16 @@ impl Lang {
             }
             "Start MITM core only" => "仅启动 MITM 内核".into(),
             "Upstream / cert settings" => "上游 / 证书设置".into(),
+            "Connect Proxifier" => "对接 Proxifier".into(),
+            "Force any already-running app's traffic into Scry by process" => {
+                "按进程把任意已运行软件的流量强制喂给 Scry".into()
+            }
+            "In Proxifier, add proxy 127.0.0.1:8888 (HTTPS) + a rule sending the target app to it" => {
+                "在 Proxifier 里加代理 127.0.0.1:8888(HTTPS),再加规则把目标软件指向它".into()
+            }
+            "Give Scry itself (and QX/sing-box) a Direct rule to avoid loops; install the CA in Settings" => {
+                "给 Scry 自身(及 QX/sing-box)加 Direct 规则防回环;到设置页安装根证书".into()
+            }
             "Capture the whole machine (passive sniff)" => "抓整机(被动嗅探)".into(),
             "Any app, but HTTPS shows metadata + SNI only (no decryption)" => {
                 "任意软件,但 HTTPS 仅元数据 + SNI(不解密)".into()
@@ -628,6 +712,37 @@ impl Lang {
             "Import" => "导入".into(),
             "Import / offline" => "离线导入 / 分析".into(),
             "Import HAR / XHR file" => "导入 HAR / XHR 文件".into(),
+            "Export HAR" => "导出 HAR".into(),
+            // 设置 → 弱网 / 限速模拟
+            "Network throttle" => "弱网 / 限速模拟".into(),
+            "Simulate slow networks (2G/3G). Applies on next capture start." => {
+                "模拟慢速网络(2G/3G)。下次开始抓包时生效。".into()
+            }
+            "Off" => "关闭".into(),
+            "Regular 2G" => "普通 2G".into(),
+            "Regular 3G" => "普通 3G".into(),
+            "Good 3G" => "良好 3G".into(),
+            "Regular 4G" => "普通 4G".into(),
+            // 代理 → Options 页:Map & Mock
+            "Map & Mock" => "映射 / 模拟(Map & Mock)".into(),
+            "Map Remote" => "映射远程(Map Remote)".into(),
+            "Map Local" => "映射本地(Map Local)".into(),
+            "Mock" => "模拟响应(Mock)".into(),
+            "Action" => "动作".into(),
+            "Match URL contains…" => "匹配 URL 包含…".into(),
+            "Target host[:port] / local file / content-type" => {
+                "目标 host[:port] / 本地文件 / content-type".into()
+            }
+            "Target host[:port]" => "目标 host[:port]".into(),
+            "Local file" => "本地文件".into(),
+            "Content-Type" => "内容类型".into(),
+            "Mock response body" => "模拟响应体".into(),
+            "Enter a URL match first" => "请先填写 URL 匹配".into(),
+            "Enter a local file path" => "请填写本地文件路径".into(),
+            "Enter a target host[:port]" => "请填写目标 host[:port]".into(),
+            "No rules — redirect a host (Map Remote), serve a local file (Map Local), or return a canned response (Mock)." => {
+                "暂无规则 —— 可重定向主机(Map Remote)、用本地文件替身响应(Map Local)、或返回固定响应(Mock)。".into()
+            }
             "Load requests exported from browser DevTools (Network → Save all as HAR)" => {
                 "导入浏览器开发者工具导出的请求(Network → 右键 Save all as HAR)".into()
             }
@@ -681,6 +796,147 @@ impl Lang {
             "Don't intercept this host" => "不拦截此 Host".into(),
             "Turn off intercept" => "关闭拦截".into(),
             "Intercept turned off" => "已关闭拦截".into(),
+            // Nuclei 模板扫描页
+            "Template scan" => "模板扫描".into(),
+            "Start scan" => "开始扫描".into(),
+            "Severity" => "严重度".into(),
+            "All severities" => "全部严重度".into(),
+            "Low and above" => "Low 及以上".into(),
+            "Medium and above" => "Medium 及以上".into(),
+            "High and above" => "High 及以上".into(),
+            "Critical only" => "仅 Critical".into(),
+            "Templates directory" => "模板目录".into(),
+            "Templates loaded" => "已加载模板".into(),
+            "Template matches" => "模板命中".into(),
+            "Path to nuclei-templates dir (optional; built-ins always run)" => {
+                "nuclei-templates 目录路径(可选;内置模板始终运行)".into()
+            }
+            "Loads nuclei-format YAML templates and runs them against the target." => {
+                "加载 nuclei 格式的 YAML 模板,逐个对目标运行。".into()
+            }
+            "Built-in templates always run; point the directory at the nuclei-templates repo for thousands more." => {
+                "内置模板始终运行;把目录指向 nuclei-templates 仓库即可白嫖几千个模板。".into()
+            }
+            "Configure a target and start scanning" => "配置目标并开始扫描".into(),
+            "No template matched" => "无模板命中".into(),
+            // Session 会话处理页
+            "Session handling" => "会话处理".into(),
+            "Apply to scans" => "套用到扫描".into(),
+            "Run login macro" => "运行登录宏".into(),
+            "Running login macro…" => "运行登录宏中…".into(),
+            "Running…" => "运行中…".into(),
+            "Login macro (raw request)" => "登录宏(原始请求)".into(),
+            "Capture & inject" => "捕获与注入".into(),
+            "Capture Set-Cookie" => "捕获 Set-Cookie".into(),
+            "Token regex (optional)" => "令牌正则(可选)".into(),
+            "Inject token into header (optional)" => "把令牌注入请求头(可选)".into(),
+            "Logged-out body marker (optional)" => "掉登录正文标记(可选)".into(),
+            "Session active" => "会话有效".into(),
+            "No session" => "无会话".into(),
+            "Active session" => "活动会话".into(),
+            "Macro status" => "宏响应状态".into(),
+            "Scans auto re-login via the macro and inject the captured session (Cookie + token)." => {
+                "扫描会自动跑登录宏重登,并把捕获的会话(Cookie + 令牌)注入每个请求。".into()
+            }
+            "e.g. csrf_token\" value=\"([^\"]+)\"" => "如 csrf_token\" value=\"([^\"]+)\"".into(),
+            "e.g. session expired" => "如 session expired".into(),
+            // 代理历史 HTTPQL 搜索框
+            "Filter / HTTPQL: resp.status.gt:400 AND req.host.cont:api" => {
+                "过滤 / HTTPQL:resp.status.gt:400 AND req.host.cont:api".into()
+            }
+            // 代理 → Site map 子页签
+            "Site map" => "站点地图".into(),
+            "No traffic captured yet" => "尚无抓到的流量".into(),
+            "Select a node to list its requests" => "选中节点以列出其请求".into(),
+            "requests" => "请求".into(),
+            "Query in history" => "在历史中查询".into(),
+            // JWT 攻击套件页
+            "JWT attack toolkit" => "JWT 攻击套件".into(),
+            "Decode any JWT and forge attack tokens (alg:none / weak HS256 / kid injection / brute force). Use only on authorized targets." => {
+                "解码任意 JWT 并伪造攻击令牌(alg:none / 弱密钥 HS256 / kid 注入 / 弱密钥爆破)。仅对已授权目标使用。".into()
+            }
+            "Paste a JWT (header.payload.signature)…" => "粘贴 JWT(header.payload.signature)…".into(),
+            "Token" => "令牌".into(),
+            "Decoded" => "解码".into(),
+            "Paste a JWT to decode" => "粘贴 JWT 以解码".into(),
+            "Load payload" => "载入 payload".into(),
+            "Loaded payload ·" => "已载入 payload ·".into(),
+            "Forge" => "伪造".into(),
+            "Payload (editable JSON)" => "Payload(可编辑 JSON)".into(),
+            "HS256 secret" => "HS256 密钥".into(),
+            "HS256 secret (sign / extra brute candidate)" => "HS256 密钥(签名 / 爆破额外候选)".into(),
+            "kid (for kid injection)" => "kid(用于 kid 注入)".into(),
+            "Sign HS256" => "HS256 签名".into(),
+            "kid injection" => "kid 注入".into(),
+            "Brute force secret" => "爆破弱密钥".into(),
+            "Result token" => "结果令牌".into(),
+            "Forged token appears here" => "伪造的令牌出现在这里".into(),
+            "Forged alg:none token" => "已伪造 alg:none 令牌".into(),
+            "Signed HS256 token" => "已签发 HS256 令牌".into(),
+            "Forged kid-injection token" => "已伪造 kid 注入令牌".into(),
+            "Enter a kid value first" => "请先填写 kid 值".into(),
+            "Brute force only supports HS256" => "弱密钥爆破仅支持 HS256".into(),
+            "Weak secret cracked:" => "爆破出弱密钥:".into(),
+            "No weak secret found" => "未爆破出弱密钥".into(),
+            "(empty secret)" => "(空密钥)".into(),
+            "Header" => "头部".into(),
+            "Signature (raw, not verified)" => "签名(原始,未验证)".into(),
+            "unsigned / none — likely forgeable" => "无签名 / none —— 大概率可伪造".into(),
+            "JWT extracted from request" => "已从请求提取 JWT".into(),
+            "No JWT found in this request" => "该请求未发现 JWT".into(),
+            // Compose 请求构造器页
+            "Compose" => "构造".into(),
+            "Response appears here" => "响应出现在这里".into(),
+            "Build a request from scratch. Use {{var}} placeholders, defined in Environment on the right." => {
+                "从零构造请求。用 {{var}} 占位符,变量在右侧「环境变量」里定义。".into()
+            }
+            "Build the request on the left, then Send" => "在左侧构造请求,然后发送".into(),
+            "Environment" => "环境变量".into(),
+            "No variables yet" => "暂无变量".into(),
+            "Add" => "添加".into(),
+            "name" => "名称".into(),
+            "value" => "值".into(),
+            "Collection" => "集合".into(),
+            "Saved requests appear here" => "保存的请求出现在这里".into(),
+            "Save" => "保存".into(),
+            "Saved request" => "已保存请求".into(),
+            "Request name to save" => "保存的请求命名".into(),
+            // GraphQL 页
+            "Query" => "查询".into(),
+            "Variables (JSON)" => "变量(JSON)".into(),
+            "Headers" => "请求头".into(),
+            "Beautify" => "美化".into(),
+            "Minify" => "压缩".into(),
+            "Introspect" => "拉取 Schema".into(),
+            "Introspecting…" => "拉取 Schema 中…".into(),
+            "Schema" => "结构 Schema".into(),
+            "Schema loaded ·" => "Schema 已加载 ·".into(),
+            // Crawl → Audit 流水线(Spider 页)
+            "Audit after crawl" => "爬完自动审计".into(),
+            // 流量统计页(Stats)
+            "Traffic stats" => "流量统计".into(),
+            "Stats" => "统计".into(),
+            "Aggregated over the current session's captured flows" => "对当前会话已抓到的流量做聚合".into(),
+            "Response bytes" => "响应字节".into(),
+            "By method" => "按方法".into(),
+            "By status" => "按状态码".into(),
+            "By type" => "按类型".into(),
+            "Top hosts" => "主机 Top".into(),
+            // 活动 WebSocket 改帧(Proxy → Options)
+            "WebSocket frames" => "WebSocket 改帧".into(),
+            "→ Server" => "→ 服务端".into(),
+            "→ Client" => "→ 客户端".into(),
+            "Find in frame…" => "在帧中查找…".into(),
+            "Enter find text first" => "请先填写查找内容".into(),
+            "No rules — rewrite live WebSocket text frames (e.g. tamper a chat / game message). Literal find → replace, per direction." => {
+                "暂无规则 —— 改写实时 WebSocket 文本帧(如篡改聊天 / 游戏消息)。字面量 查找 → 替换,按方向。".into()
+            }
+            "Rewrite live WS text frames. Takes effect on next capture start." => {
+                "改写实时 WS 文本帧。下次开始抓包时生效。".into()
+            }
+            "Send a query or run Introspect" => "发送查询,或点「拉取 Schema」".into(),
+            "Invalid endpoint URL" => "端点 URL 非法".into(),
+            "Imported from request" => "已从请求导入".into(),
             // 兜底:原样返回(URL / 协议名 / 数字等)
             _ => SharedString::from(en.to_owned()),
         }

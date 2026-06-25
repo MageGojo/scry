@@ -55,32 +55,48 @@ pub enum Tab {
     Sqli,
     Xss,
     Authz,
+    Nuclei,
+    Session,
     Spider,
+    Compose,
+    Graphql,
     Repeater,
+    WsRepeater,
     Intruder,
+    Race,
     Sequencer,
     Decoder,
+    Jwt,
     Comparer,
     Logger,
+    Stats,
     Extender,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 15] = [
+    pub const ALL: [Tab; 23] = [
         Tab::Dashboard,
         Tab::Proxy,
         Tab::Scanner,
         Tab::Sqli,
         Tab::Xss,
         Tab::Authz,
+        Tab::Nuclei,
+        Tab::Session,
         Tab::Spider,
+        Tab::Compose,
+        Tab::Graphql,
         Tab::Repeater,
+        Tab::WsRepeater,
         Tab::Intruder,
+        Tab::Race,
         Tab::Sequencer,
         Tab::Decoder,
+        Tab::Jwt,
         Tab::Comparer,
         Tab::Logger,
+        Tab::Stats,
         Tab::Extender,
         Tab::Settings,
     ];
@@ -93,13 +109,21 @@ impl Tab {
             Tab::Sqli => "SQLi",
             Tab::Xss => "XSS",
             Tab::Authz => "Authz",
+            Tab::Nuclei => "Nuclei",
+            Tab::Session => "Session",
             Tab::Spider => "Spider",
+            Tab::Compose => "Compose",
+            Tab::Graphql => "GraphQL",
             Tab::Repeater => "Repeater",
+            Tab::WsRepeater => "WS Repeater",
             Tab::Intruder => "Intruder",
+            Tab::Race => "Race",
             Tab::Sequencer => "Sequencer",
             Tab::Decoder => "Decoder",
+            Tab::Jwt => "JWT",
             Tab::Comparer => "Comparer",
             Tab::Logger => "Logger",
+            Tab::Stats => "Stats",
             Tab::Extender => "Extender",
             Tab::Settings => "Settings",
         }
@@ -113,13 +137,21 @@ impl Tab {
             Tab::Sqli => IconName::Layers,
             Tab::Xss => IconName::Tag,
             Tab::Authz => IconName::Shield,
+            Tab::Nuclei => IconName::Folder,
+            Tab::Session => IconName::Power,
             Tab::Spider => IconName::GitBranch,
+            Tab::Compose => IconName::Plus,
+            Tab::Graphql => IconName::Layers,
             Tab::Repeater => IconName::Refresh,
+            Tab::WsRepeater => IconName::Globe,
             Tab::Intruder => IconName::Zap,
+            Tab::Race => IconName::Clock,
             Tab::Sequencer => IconName::Sort,
             Tab::Decoder => IconName::Hash,
+            Tab::Jwt => IconName::Shield,
             Tab::Comparer => IconName::Copy,
             Tab::Logger => IconName::Clock,
+            Tab::Stats => IconName::Sort,
             Tab::Extender => IconName::Package,
             Tab::Settings => IconName::Settings,
         }
@@ -195,22 +227,29 @@ impl MsgView {
     }
 }
 
-/// 中栏工具条页签(History / WebSocket / Intercept / Options)。
+/// 中栏工具条页签(History / WebSocket / Site map / Intercept / Options)。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HistTab {
     History,
     WebSocket,
+    SiteMap,
     Intercept,
     Options,
 }
 
 impl HistTab {
-    pub const ALL: [HistTab; 4] =
-        [HistTab::History, HistTab::WebSocket, HistTab::Intercept, HistTab::Options];
+    pub const ALL: [HistTab; 5] = [
+        HistTab::History,
+        HistTab::WebSocket,
+        HistTab::SiteMap,
+        HistTab::Intercept,
+        HistTab::Options,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             HistTab::History => "HTTP History",
             HistTab::WebSocket => "WebSocket",
+            HistTab::SiteMap => "Site map",
             HistTab::Intercept => "Intercept",
             HistTab::Options => "Options",
         }
@@ -399,6 +438,16 @@ pub struct ScanMsg {
     pub finding: Option<scry_scan::Finding>,
 }
 
+/// OOB 带外扫描后台 → 前台的流式消息(状态更新 / 带外回连确认的发现 / 收尾标志)。
+pub struct OobMsg {
+    /// 状态文案(会话就绪 / 发送进度 / 轮询进度 / 错误);`None` = 仅传发现。
+    pub status: Option<String>,
+    /// 带外回连确认的发现(无则 `None`)。
+    pub finding: Option<scry_scan::Finding>,
+    /// 后台任务收尾标志(全部轮询结束 / 出错退出时置 `true`)。
+    pub done: bool,
+}
+
 /// SQLi 测试日志行级别(决定颜色:命中绿 / 信息默认 / 提醒黄 / 失败红)。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SqliLevel {
@@ -413,6 +462,19 @@ pub enum SqliLevel {
 pub struct SqliLine {
     pub level: SqliLevel,
     pub text: String,
+}
+
+/// 枚举 / dump 出的一张表(库表枚举 + 可选样本行)。
+#[derive(Clone, Default)]
+pub struct SqliTableDump {
+    /// 表名。
+    pub name: String,
+    /// 列名(可能只枚举了前若干列)。
+    pub columns: Vec<String>,
+    /// 取到的样本行(每行按已 dump 的列顺序排列;可能只取了部分行 / 列)。
+    pub rows: Vec<Vec<String>>,
+    /// 该表总行数(COUNT(*),取到则填)。
+    pub row_count: Option<usize>,
 }
 
 /// SQLi 测试结论(随测试推进逐步填充)。
@@ -432,6 +494,8 @@ pub struct SqliReport {
     pub version: Option<String>,
     pub user: Option<String>,
     pub database: Option<String>,
+    /// 枚举 / dump 出的库表结构与样本数据(sqlmap 式)。
+    pub tables: Vec<SqliTableDump>,
 }
 
 /// SQLi 后台 runner → 前台的流式消息。
@@ -498,6 +562,63 @@ pub struct AuthzMsg {
     pub finding: Option<scry_scan::Finding>,
     /// 进度文案。
     pub progress: Option<String>,
+    /// 是否结束。
+    pub done: bool,
+}
+
+/// 竞态 / single-packet(Race)后台 runner → 前台的流式消息。
+pub struct RaceMsg {
+    /// 追加日志行(复用 [`SqliLine`])。
+    pub line: Option<SqliLine>,
+    /// 各路结果(发完一次性整体回传)。
+    pub results: Option<Vec<scry_proxy::race::RaceResult>>,
+    /// 统计判定(整体替换一次)。
+    pub summary: Option<scry_proxy::race::RaceSummary>,
+    /// 进度文案。
+    pub progress: Option<String>,
+    /// 是否结束。
+    pub done: bool,
+}
+
+/// 一条 nuclei 模板命中(模板名 / id 为动态字符串,故不复用 `scry_scan::Finding`)。
+#[derive(Clone)]
+pub struct NucleiHit {
+    /// 模板 id(如 `git-config`)。
+    pub template_id: String,
+    /// 模板展示名(`info.name`)。
+    pub name: String,
+    /// 严重度(映射到 `scry_scan::Severity` 以复用着色)。
+    pub severity: scry_scan::Severity,
+    /// 命中的请求 URL。
+    pub url: String,
+    /// 命中的 matcher 名 / 类型(拼接)。
+    pub matchers: String,
+    /// extractor 抽到的证据(拼接;可能为空)。
+    pub extracted: String,
+}
+
+/// nuclei 模板扫描后台 runner → 前台的流式消息。
+pub struct NucleiMsg {
+    /// 追加日志行(复用 [`SqliLine`])。
+    pub line: Option<SqliLine>,
+    /// 追加一条命中。
+    pub hit: Option<NucleiHit>,
+    /// 模板加载统计:`(已加载, 跳过+失败)`(加载完成后置一次)。
+    pub loaded: Option<(usize, usize)>,
+    /// 进度文案。
+    pub progress: Option<String>,
+    /// 是否结束。
+    pub done: bool,
+}
+
+/// 会话处理「运行登录宏」后台 → 前台的流式消息。
+pub struct SessionMsg {
+    /// 追加日志行(复用 [`SqliLine`])。
+    pub line: Option<SqliLine>,
+    /// 宏运行结果:`(状态码, 捕获到的会话)`。
+    pub result: Option<(u16, scry_session::SessionState)>,
+    /// 错误文案。
+    pub error: Option<String>,
     /// 是否结束。
     pub done: bool,
 }
@@ -579,6 +700,8 @@ pub struct ScryApp {
     pub scope_rules: Vec<crate::rules::ScopeRule>,
     /// Match & Replace 自动改包规则。
     pub replace_rules: Vec<crate::rules::ReplaceRule>,
+    /// Map Local / Map Remote / Mock 规则。
+    pub map_rules: Vec<crate::rules::MapRule>,
     /// 新增范围规则的表单:方向 / 字段 / 算子 / 值 / 取反 / 拦截或排除。
     pub sr_dir: crate::ext::InterceptDir,
     pub sr_field: crate::rules::Field,
@@ -594,6 +717,25 @@ pub struct ScryApp {
     pub mr_find: Entity<InputState>,
     pub mr_replace: Entity<InputState>,
     pub mr_regex: bool,
+    // Map Local / Map Remote / Mock 新增表单。
+    /// 动作类型:0 = Map Remote,1 = Map Local,2 = Mock。
+    pub map_kind: usize,
+    /// 匹配值(按 URL contains 匹配)。
+    pub map_match: Entity<InputState>,
+    /// 目标:Remote=host[:port];Local=本地文件路径;Mock=content-type。
+    pub map_to: Entity<InputState>,
+    /// Mock 响应状态码。
+    pub map_status: Entity<InputState>,
+    /// Mock 响应体。
+    pub map_body: Entity<InputState>,
+    // 活动 WebSocket 改帧规则(对标 Burp WebSockets intercept):文本帧字面量 find → replace,按方向。
+    /// 当前 WS 改帧规则(直接喂内核 `ProxyConfig.ws_rewrite`;持久化 `~/.scry/ws_rules.json`)。
+    pub ws_rules: Vec<scry_proxy::websocket::WsRewriteRule>,
+    /// 新增 WS 规则的方向:`true` = 客户端→服务端(出站),`false` = 服务端→客户端(入站)。
+    pub ws_rule_to_server: bool,
+    /// 新增 WS 规则的查找 / 替换文本。
+    pub ws_rule_find: Entity<InputState>,
+    pub ws_rule_replace: Entity<InputState>,
     // Inspector
     pub insp_tab: InspTab,
     /// 4 个折叠分组的展开态:Req Headers / Req Cookies / Resp Headers / Resp Cookies。
@@ -639,6 +781,19 @@ pub struct ScryApp {
     pub scan_rx: Option<std::sync::mpsc::Receiver<ScanMsg>>,
     /// 主动扫描控制位(Running / Paused / Stopped;见 scanner.rs 常量),后台逐探测查询。
     pub scan_ctrl: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    // OOB 带外检测(interactsh):盲 SSRF/RCE/SQLi/XXE/盲打 XSS 靠回连确认
+    /// 带外扫描进行中(后台注册 / 发探测 / 轮询时禁用按钮)。
+    pub oob_busy: bool,
+    /// 选中的带外服务器索引(对应 `scry_oob::PUBLIC_SERVERS`)。
+    pub oob_server_idx: usize,
+    /// 带外服务器下拉是否展开。
+    pub oob_server_open: bool,
+    /// 带外扫描状态文案(会话域名 / 发送进度 / 轮询进度 / 命中数 / 错误)。
+    pub oob_status: Option<String>,
+    /// 带外扫描结果流式回传通道(后台 → 前台);停止即丢弃。
+    pub oob_rx: Option<std::sync::mpsc::Receiver<OobMsg>>,
+    /// 带外扫描停止位(后台轮询每轮查询;`false` = 继续,`true` = 停止)。
+    pub oob_ctrl: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     // SQLi 注入测试(sqlmap 式:选请求 + 注入点 → 报错 / 布尔 / 时间 / 联合 探测 + 取数)
     /// 目标 `scheme://host[:port]`。
     pub sqli_target: Entity<InputState>,
@@ -652,6 +807,8 @@ pub struct ScryApp {
     pub sqli_secs: u32,
     /// 睡眠秒数下拉是否展开。
     pub sqli_secs_open: bool,
+    /// 确认注入后是否继续枚举库表 + 取数(sqlmap 式 dump;盲注通道较慢,故可关)。
+    pub sqli_dump: bool,
     /// 测试进行中(后台 replay 发包时显示「停止」)。
     pub sqli_busy: bool,
     /// 进度文案。
@@ -689,6 +846,8 @@ pub struct ScryApp {
     pub xss_ctrl: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 验证模式:`false` = 静态反射检测(replay);`true` = 浏览器真执行确认(drission 无头 Chrome 弹 alert)。
     pub xss_dom: bool,
+    /// 存储型 / 盲打 XSS 模式:注入唯一载荷 → 重访同站其它页面看是否被持久化回显。
+    pub xss_stored: bool,
     /// 浏览器验证用的无头 Chrome 子进程(scry 自启,停止 / 完成 / 关软件时 kill)。
     pub xss_child: Option<std::process::Child>,
     // 越权 / 访问控制测试(Authz,Autorize 式:同一请求用 高权限 / 低权限 / 匿名 多身份重放比对)
@@ -716,6 +875,87 @@ pub struct ScryApp {
     pub authz_rx: Option<std::sync::mpsc::Receiver<AuthzMsg>>,
     /// 停止标志(置位即让后台 runner 收尾退出)。
     pub authz_ctrl: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    // 竞态 / single-packet(Race,Turbo Intruder 式:同一请求并发 N 路,最后字节同步 / 并行)
+    /// 目标 `scheme://host[:port]`。
+    pub race_target: Entity<InputState>,
+    /// 可编辑的原始请求(并发发它的 N 份拷贝)。
+    pub race_req: Entity<InputState>,
+    /// 并发路数(默认 20)。
+    pub race_count: usize,
+    /// 发送模式:`true` = 最后字节同步(single-packet)· `false` = 朴素并行。
+    pub race_mode_sync: bool,
+    /// 测试进行中。
+    pub race_busy: bool,
+    /// 进度文案。
+    pub race_progress: Option<String>,
+    /// 测试日志(复用 [`SqliLine`];最新在末尾)。
+    pub race_log: Vec<SqliLine>,
+    /// 各路结果(按 idx 排序)。
+    pub race_results: Vec<scry_proxy::race::RaceResult>,
+    /// 统计判定(发完填充)。
+    pub race_summary: Option<scry_proxy::race::RaceSummary>,
+    /// 是否已运行过(区分「未测试」与「测试后无响应」)。
+    pub race_ran: bool,
+    /// 结果流式回传通道(后台 → 前台);停止即丢弃。
+    pub race_rx: Option<std::sync::mpsc::Receiver<RaceMsg>>,
+    // nuclei 模板扫描(对标 nuclei:加载社区 YAML 模板 → 对目标逐模板发请求 → matcher/extractor 判命中)
+    /// 目标 `scheme://host[:port]`。
+    pub nuclei_target: Entity<InputState>,
+    /// 模板目录(留空 = 仅用内置模板;指向 nuclei-templates 仓库即可白嫖几千模板)。
+    pub nuclei_dir: Entity<InputState>,
+    /// 最小严重度过滤索引(见 nuclei.rs `SEV_OPTS`)。
+    pub nuclei_sev: usize,
+    /// 严重度下拉是否展开。
+    pub nuclei_sev_open: bool,
+    /// 扫描进行中。
+    pub nuclei_busy: bool,
+    /// 进度文案。
+    pub nuclei_progress: Option<String>,
+    /// 测试日志(复用 [`SqliLine`];最新在末尾)。
+    pub nuclei_log: Vec<SqliLine>,
+    /// 命中的模板列表。
+    pub nuclei_hits: Vec<NucleiHit>,
+    /// 已加载模板数 / 跳过+失败数(加载完成后填,展示统计)。
+    pub nuclei_loaded: usize,
+    pub nuclei_skipped: usize,
+    /// 是否已运行过(区分「未扫描」与「扫描后无命中」)。
+    pub nuclei_ran: bool,
+    /// 结果流式回传通道(后台 → 前台);停止即丢弃。
+    pub nuclei_rx: Option<std::sync::mpsc::Receiver<NucleiMsg>>,
+    /// 停止标志(置位即让后台 runner 收尾退出)。
+    pub nuclei_ctrl: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    // 会话处理(Session·对标 Burp Session Handling + Macros):登录宏 + 会话/令牌捕获注入 + 自动重登
+    /// 登录宏目标 `scheme://host[:port]`。
+    pub session_target: Entity<InputState>,
+    /// 登录宏原始请求(如 POST /login)。
+    pub session_macro: Entity<InputState>,
+    /// 令牌捕获正则(可选;取第 1 个捕获组,CSRF/JWT)。
+    pub session_token_regex: Entity<InputState>,
+    /// 把令牌注入哪个请求头(可选,如 `X-CSRF-Token`)。
+    pub session_token_header: Entity<InputState>,
+    /// 「掉登录」正文标记(可选,如 `session expired`)。
+    pub session_logout_body: Entity<InputState>,
+    /// 是否捕获 `Set-Cookie`(默认开)。
+    pub session_capture_cookies: bool,
+    /// 是否把会话套到各扫描(总开关;开后扫描自动跑登录宏重登 + 注入)。
+    pub session_apply: bool,
+    /// 运行登录宏中。
+    pub session_busy: bool,
+    /// 最近一次捕获到的会话(展示 + 手动测试用)。
+    pub session_active: Option<scry_session::SessionState>,
+    /// 最近一次宏响应状态码。
+    pub session_status: Option<u16>,
+    /// 状态 / 错误文案。
+    pub session_msg: Option<String>,
+    /// 运行日志(复用 [`SqliLine`])。
+    pub session_log: Vec<SqliLine>,
+    /// 结果流式回传通道(后台 → 前台)。
+    pub session_rx: Option<std::sync::mpsc::Receiver<SessionMsg>>,
+    // 站点地图(Site map · 代理页子页签):把抓到的流量按 host → 路径段组织成可展开树。
+    /// 已展开的树节点(键 = 节点 full 前缀)。
+    pub sitemap_expanded: std::collections::HashSet<String>,
+    /// 当前选中的树节点(键 = 节点 full 前缀);右侧列出其子树请求。
+    pub sitemap_selected: Option<String>,
     // 站点爬虫(Spider)—— 独立「爬虫」页发起:drission(CDP)真实浏览器从种子 BFS 抓站,
     // 流量经 MITM 自动落历史(代理页可见)、可被扫描。
     /// 种子 URL 输入(空白 / 换行分隔多个;省略 scheme 默认补 https)。
@@ -741,6 +981,10 @@ pub struct ScryApp {
     /// 爬虫专用的无头 Chrome 子进程(scry 自启 + drission connect 接管):进程归 scry 管,
     /// 停止 / 爬完 / 关软件时统一 kill,杜绝孤儿浏览器。
     pub crawl_child: Option<std::process::Child>,
+    /// Crawl → Audit 流水线:爬完自动把抓到的流量喂给扫描器(被动 + 主动)。
+    pub crawl_then_audit: bool,
+    /// 本轮爬虫的主 host(种子 host),爬完审计时用它把扫描范围限到爬过的站。
+    pub crawl_audit_host: Option<String>,
     // 爆破(Intruder)
     /// 目标 `scheme://host[:port]`。
     pub it_target: Entity<InputState>,
@@ -818,6 +1062,72 @@ pub struct ScryApp {
     pub dec_note: Option<String>,
     /// 上次变换是否失败(提示着色)。
     pub dec_err: bool,
+    // JWT 攻击套件(对标 Burp JWT Editor):解码 + alg:none / HS256 弱密钥伪造 / kid 注入 / 弱密钥爆破
+    /// 待分析 / 攻击的 JWT(代理右键「发送到 JWT」从请求自动提取,或手动粘贴)。
+    pub jwt_input: Entity<InputState>,
+    /// 可编辑的 payload JSON(伪造时用;「载入」按钮从当前令牌解出填入)。
+    pub jwt_payload: Entity<InputState>,
+    /// HS256 签名 / 爆破用的密钥(伪造填它签;爆破时并入内置弱密钥表一起试)。
+    pub jwt_secret: Entity<InputState>,
+    /// kid 注入值(目录穿越 / SQLi 等)。
+    pub jwt_kid: Entity<InputState>,
+    /// 生成结果令牌(只读可选中,复制后粘回重放 / Compose)。
+    pub jwt_out: Entity<InputState>,
+    /// 弱密钥爆破结果(命中密钥 / 未命中);None = 未爆破。
+    pub jwt_crack: Option<String>,
+    /// 操作状态 / 错误提示。
+    pub jwt_msg: Option<String>,
+    // Compose 请求构造器(对标 Reqable Compose / Postman):从零建请求 + {{var}} 环境变量 + 集合保存
+    /// 目标 `scheme://host[:port]`(支持 `{{var}}` 环境变量)。
+    pub compose_target: Entity<InputState>,
+    /// 可编辑的原始请求(请求行 + 头 + 空行 + body,支持 `{{var}}`)。
+    pub compose_req: Entity<InputState>,
+    /// 最近一次响应。
+    pub compose_resp: Option<HttpFlow>,
+    /// 发送错误。
+    pub compose_err: Option<String>,
+    /// 发送中。
+    pub compose_sending: bool,
+    /// 响应区视图(Pretty / Raw / Hex / Render)。
+    pub compose_resp_view: MsgView,
+    /// 响应只读可选中高亮查看器(由 `sync_compose_view` 灌入)。
+    pub compose_resp_input: Entity<InputState>,
+    /// 上次同步 `compose_resp_input` 的签名。
+    pub compose_resp_sig: u64,
+    /// 环境变量表(`name` → `value`;发送前把请求里的 `{{name}}` 替换掉)。
+    pub compose_env: Vec<(String, String)>,
+    /// 新增环境变量的名 / 值输入。
+    pub compose_env_name: Entity<InputState>,
+    pub compose_env_value: Entity<InputState>,
+    /// 已保存的请求集合(命名快照;持久化 `~/.scry/compose.json`)。
+    pub compose_saved: Vec<crate::compose::SavedRequest>,
+    /// 保存当前请求用的命名输入。
+    pub compose_name: Entity<InputState>,
+    // GraphQL(对标 Burp/Reqable GraphQL 视图):美化/压缩 + 变量分离 + introspection 拉 schema
+    /// GraphQL 端点 URL。
+    pub graphql_endpoint: Entity<InputState>,
+    /// 查询(可美化 / 压缩)。
+    pub graphql_query: Entity<InputState>,
+    /// 变量(JSON)。
+    pub graphql_vars: Entity<InputState>,
+    /// 额外请求头(`Key: value` 每行一条,可选;如 Authorization)。
+    pub graphql_headers: Entity<InputState>,
+    /// 最近一次响应。
+    pub graphql_resp: Option<HttpFlow>,
+    /// 发送错误。
+    pub graphql_err: Option<String>,
+    /// 发送 / introspection 中。
+    pub graphql_sending: bool,
+    /// 响应区视图。
+    pub graphql_resp_view: MsgView,
+    /// 响应只读可选中高亮查看器。
+    pub graphql_resp_input: Entity<InputState>,
+    /// 上次同步签名。
+    pub graphql_resp_sig: u64,
+    /// 最近一次 introspection 解析出的 schema(None = 未拉取)。
+    pub graphql_schema: Option<scry_graphql::Schema>,
+    /// 操作状态 / 错误提示。
+    pub graphql_msg: Option<String>,
     // 比较器(Comparer)
     /// 待比较的两段文本。
     pub cmp_a: Entity<InputState>,
@@ -840,9 +1150,7 @@ pub struct ScryApp {
     pub sniff_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 实时推流接收端:抓包时 `Store` 每条新流量 clone 推来,UI `try_recv` 增量追加(替代全量轮询)。
     pub flow_rx: Option<std::sync::mpsc::Receiver<HttpFlow>>,
-    /// T2 托管启动:要拉起的程序 / 命令(如 `curl https://example.com`)。
-    pub prog_input: Entity<InputState>,
-    /// 被 scry 拉起的子进程(内置浏览器 / 托管程序);停止抓包 / 退出时统一收掉,周期回收退出者。
+    /// 被 scry 拉起的子进程(内置浏览器);停止抓包 / 退出时统一收掉,周期回收退出者。
     pub launched: Vec<crate::launcher::Launched>,
     /// 历史表虚拟列表滚动句柄(跨帧记住滚动位置;虚拟化只渲可见行,大数据不卡)。
     pub hist_scroll: UniformListScrollHandle,
@@ -856,10 +1164,30 @@ pub struct ScryApp {
     pub iface_open: bool,
     /// 内核抓包时是否同时把原始帧落 pcapng(Wireshark 可开)。
     pub pcapng_enabled: bool,
+    /// 正在后台下载内置浏览器(Chrome for Testing),按钮禁用 + 显示进行中。
+    pub chromium_downloading: bool,
     /// TLS 指纹伪装 profile 下标(`scry_proxy::tls_profile::TlsProfile::ALL`)。
     pub tls_profile_sel: usize,
     /// TLS 指纹下拉是否展开。
     pub tls_profile_open: bool,
+    /// 弱网/限速预设下标(`scry_proxy::throttle::PRESETS`,0 = Off)。下次开始抓包生效。
+    pub throttle_sel: usize,
+    /// 限速预设下拉是否展开。
+    pub throttle_open: bool,
+    /// 代理监听端口输入(字符串,解析失败回退 8888);下次开始抓包生效 + 持久化 `~/.scry/proxy.json`。
+    pub proxy_port: Entity<InputState>,
+    /// 允许局域网设备(手机等)连本机代理:开 = 绑 `0.0.0.0`,关 = 仅 `127.0.0.1`。
+    pub proxy_lan: bool,
+    // WS 重放(WebSocket Repeater):主动连 WS + 双向收发。
+    pub ws_rep_url: Entity<InputState>,
+    pub ws_rep_send: Entity<InputState>,
+    pub ws_rep_msgs: Vec<crate::ws_repeater::WsRepMsg>,
+    pub ws_rep_connected: bool,
+    pub ws_rep_status: Option<String>,
+    /// UI → 会话:发送命令(连接期间为 Some)。
+    pub ws_rep_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<scry_proxy::ws_client::WsCommand>>,
+    /// 会话 → UI:事件接收端(连接期间为 Some;关闭后清空令轮询停止)。
+    pub ws_rep_evt_rx: Option<std::sync::mpsc::Receiver<scry_proxy::ws_client::WsEvent>>,
     /// 当前 history 是否为内置演示数据(界面标注用)。
     pub demo: bool,
     // 证书
@@ -992,7 +1320,7 @@ impl ScryApp {
         let lang = Lang::Zh;
         let search = cx.new(|cx| {
             InputState::single_line(cx)
-                .placeholder(lang.t("Filter: host / path / header / body…"))
+                .placeholder(lang.t("Filter / HTTPQL: resp.status.gt:400 AND req.host.cont:api"))
                 .clearable(true)
         });
         cx.observe(&search, |_this, _src, cx| cx.notify()).detach();
@@ -1183,6 +1511,78 @@ impl ScryApp {
         });
         cx.observe(&authz_req, |_this, _src, cx| cx.notify()).detach();
 
+        // 竞态 / single-packet:预填一条样例请求当攻击目标(右键「发送到竞态」也会带入)。
+        let (race_target_text, race_req_text) = match sample {
+            Some(f) => (
+                crate::repeater::target_string(f),
+                crate::repeater::render_raw_request(f),
+            ),
+            None => (String::new(), String::new()),
+        };
+        let race_target = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("https://host[:port]"))
+                .clearable(true)
+                .with_text(race_target_text)
+        });
+        let race_req = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("POST /api/checkout HTTP/1.1\nHost: example.com\nContent-Type: application/json\n\n{\"coupon\":\"X\"}")
+                .min_rows(10)
+                .with_text(race_req_text)
+        });
+        cx.observe(&race_req, |_this, _src, cx| cx.notify()).detach();
+
+        // nuclei 模板扫描:目标预填一条样例的根 URL;模板目录默认 ~/.scry/nuclei-templates。
+        let nuclei_target = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("https://host[:port]"))
+                .clearable(true)
+                .with_text(sample.map(crate::repeater::target_string).unwrap_or_default())
+        });
+        let nuclei_dir_default = std::env::var_os("HOME")
+            .map(|h| {
+                let mut p = std::path::PathBuf::from(h);
+                p.push(".scry");
+                p.push("nuclei-templates");
+                p.to_string_lossy().into_owned()
+            })
+            .unwrap_or_default();
+        let nuclei_dir = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("Path to nuclei-templates dir (optional; built-ins always run)"))
+                .clearable(true)
+                .with_text(nuclei_dir_default)
+        });
+
+        // 会话处理:登录宏(目标 + 原始请求)+ 捕获/注入/登出配置。
+        let session_target = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("https://host[:port]"))
+                .clearable(true)
+                .with_text(sample.map(crate::repeater::target_string).unwrap_or_default())
+        });
+        let session_macro = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("POST /login HTTP/1.1\nHost: example.com\nContent-Type: application/x-www-form-urlencoded\n\nusername=admin&password=secret")
+                .min_rows(10)
+        });
+        let session_token_regex = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("e.g. csrf_token\" value=\"([^\"]+)\""))
+                .clearable(true)
+        });
+        let session_token_header = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder("X-CSRF-Token")
+                .clearable(true)
+        });
+        let session_logout_body = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("e.g. session expired"))
+                .clearable(true)
+        });
+
         // 序列器:令牌样本输入(每行一个;空开局,点「加载样例」或「从流量」填充);改动即刷新计数。
         let seq_input = cx.new(|cx| {
             InputState::multi_line(cx)
@@ -1218,6 +1618,112 @@ impl ScryApp {
         });
         cx.observe(&dec_input, |_this, _src, cx| cx.notify()).detach();
         cx.observe(&dec_output, |_this, _src, cx| cx.notify()).detach();
+
+        // JWT 攻击套件:令牌 / 可编辑 payload / 密钥 / kid / 结果。
+        let jwt_input = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder(lang.t("Paste a JWT (header.payload.signature)…"))
+                .min_rows(4)
+        });
+        cx.observe(&jwt_input, |_this, _src, cx| cx.notify()).detach();
+        let jwt_payload = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("{\"sub\":\"1\",\"role\":\"admin\"}")
+                .min_rows(4)
+                .with_text("{\"sub\":\"1\",\"role\":\"admin\"}")
+        });
+        let jwt_secret = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("HS256 secret (sign / extra brute candidate)"))
+                .clearable(true)
+        });
+        let jwt_kid = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder("../../dev/null  ·  x' UNION SELECT …")
+                .clearable(true)
+        });
+        let jwt_out = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .read_only(true)
+                .font_family(model::MONO)
+                .placeholder(lang.t("Forged token appears here"))
+                .min_rows(4)
+        });
+
+        // Compose 请求构造器:从持久化加载环境变量 + 集合(无则给一组演示默认)。
+        let (mut compose_env, compose_saved) = crate::compose::load_compose();
+        if compose_env.is_empty() {
+            compose_env = vec![
+                ("host".to_string(), "example.com".to_string()),
+                ("token".to_string(), "REPLACE_ME".to_string()),
+            ];
+        }
+        let compose_target = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("https://{{host}}"))
+                .clearable(true)
+                .with_text("https://{{host}}")
+        });
+        let compose_req = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("GET /path HTTP/1.1\nHost: {{host}}\nAuthorization: Bearer {{token}}\n\n<body>")
+                .min_rows(12)
+                .with_text(
+                    "GET / HTTP/1.1\nHost: {{host}}\nUser-Agent: scry-compose\nAccept: */*\n\n",
+                )
+        });
+        let compose_resp_input = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .read_only(true)
+                .font_family(model::MONO)
+                .font_size(cx.theme().tokens.font_size.xs)
+                .placeholder(lang.t("Response appears here"))
+                .min_rows(8)
+        });
+        let compose_env_name = cx.new(|cx| {
+            InputState::single_line(cx).placeholder(lang.t("name")).clearable(true)
+        });
+        let compose_env_value = cx.new(|cx| {
+            InputState::single_line(cx).placeholder(lang.t("value")).clearable(true)
+        });
+        let compose_name = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("Request name to save"))
+                .clearable(true)
+        });
+
+        // GraphQL:端点 + 查询 + 变量 + 额外头 + 响应查看器。
+        let graphql_endpoint = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("https://host/graphql"))
+                .clearable(true)
+                .with_text("https://countries.trevorblades.com/")
+        });
+        let graphql_query = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("query { __typename }")
+                .min_rows(10)
+                .with_text("query {\n  countries {\n    code\n    name\n  }\n}")
+        });
+        cx.observe(&graphql_query, |_this, _src, cx| cx.notify()).detach();
+        let graphql_vars = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("{ \"id\": 1 }")
+                .min_rows(3)
+        });
+        let graphql_headers = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder(lang.t("Header: value per line (optional)"))
+                .min_rows(2)
+        });
+        let graphql_resp_input = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .read_only(true)
+                .font_family(model::MONO)
+                .font_size(cx.theme().tokens.font_size.xs)
+                .placeholder(lang.t("Response appears here"))
+                .min_rows(8)
+        });
 
         // 代理详情(原始 / 十六进制 / 渲染视图):只读可选中文本框,支持选中 + Cmd/Ctrl+C 复制。
         // 字体对齐右侧检查器(等宽 Menlo + xs 字号),让报文区与检查器观感一致;美化视图另走只读高亮
@@ -1261,6 +1767,35 @@ impl ScryApp {
                 .clearable(true)
         });
         let mr_replace = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("Replace with…"))
+                .clearable(true)
+        });
+        let map_match = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("Match URL contains…"))
+                .clearable(true)
+        });
+        let map_to = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("Target host[:port] / local file / content-type"))
+                .clearable(true)
+        });
+        let map_status = cx.new(|cx| {
+            InputState::single_line(cx).placeholder("200").clearable(true).with_text("200")
+        });
+        let map_body = cx.new(|cx| {
+            InputState::multi_line(cx).placeholder(lang.t("Mock response body"))
+        });
+
+        // 活动 WS 改帧规则:从磁盘加载 + 新增表单输入。
+        let ws_rules = crate::rules::load_ws_rules();
+        let ws_rule_find = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder(lang.t("Find in frame…"))
+                .clearable(true)
+        });
+        let ws_rule_replace = cx.new(|cx| {
             InputState::single_line(cx)
                 .placeholder(lang.t("Replace with…"))
                 .clearable(true)
@@ -1326,14 +1861,6 @@ impl ScryApp {
         let sessions = vec![model::new_session("默认会话", 0)];
         let rename_input = cx.new(InputState::single_line);
 
-        // T2 托管启动:命令输入(预填一个能演示解密的示例)。
-        let prog_input = cx.new(|cx| {
-            InputState::single_line(cx)
-                .placeholder(lang.t("e.g. curl https://example.com"))
-                .clearable(true)
-                .with_text("curl https://example.com")
-        });
-
         // 上游代理输入(预填探测到的 sing-box 本地入口;默认关,在设置页开关启用)。
         let upstream_input = cx.new(|cx| {
             InputState::single_line(cx)
@@ -1341,6 +1868,29 @@ impl ScryApp {
                 .clearable(true)
                 .with_text("http://127.0.0.1:20122")
         });
+
+        // 代理监听端口 / 局域网开关(从 ~/.scry/proxy.json 恢复;手机抓包靠局域网开关绑 0.0.0.0)。
+        let (cfg_port, cfg_lan) = crate::capture::load_net_cfg();
+        let proxy_port = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder("8888")
+                .clearable(true)
+                .with_text(cfg_port.to_string())
+        });
+
+        // WS 重放页输入(目标地址 + 发送内容)。
+        let ws_rep_url = cx.new(|cx| {
+            InputState::single_line(cx)
+                .placeholder("wss://echo.websocket.events")
+                .clearable(true)
+        });
+        cx.observe(&ws_rep_url, |_this, _src, cx| cx.notify()).detach();
+        let ws_rep_send = cx.new(|cx| {
+            InputState::multi_line(cx)
+                .placeholder("{\"type\":\"ping\"}")
+                .min_rows(3)
+        });
+        cx.observe(&ws_rep_send, |_this, _src, cx| cx.notify()).detach();
 
         // 事件日志搜索框 + 初始一条「启动」日志。
         let log_search = cx.new(|cx| {
@@ -1363,6 +1913,9 @@ impl ScryApp {
                 .with_text(crawl_seed_text)
         });
         cx.observe(&crawl_seed, |_this, _src, cx| cx.notify()).detach();
+
+        // 启动即从磁盘一次性加载已保存的拦截 / 改包 / Map 规则。
+        let (loaded_scope, loaded_replace, loaded_maps) = crate::rules::load_rules();
 
         Self {
             // 默认落在仪表盘:先点选抓包源(默认代理),再开始抓包(Wireshark 式)。
@@ -1392,9 +1945,10 @@ impl ScryApp {
             intercept_queue: std::collections::VecDeque::new(),
             intercept_edit,
             intercept_edit_id: None,
-            // 启动即从磁盘加载已保存的拦截 / 改包规则(抓包时 sync_rules_to_engine 推给引擎自动生效)。
-            scope_rules: crate::rules::load_rules().0,
-            replace_rules: crate::rules::load_rules().1,
+            // 启动即从磁盘加载已保存的拦截 / 改包 / Map 规则(抓包时 sync_rules_to_engine 推给引擎自动生效)。
+            scope_rules: loaded_scope,
+            replace_rules: loaded_replace,
+            map_rules: loaded_maps,
             sr_dir: crate::ext::InterceptDir::Request,
             sr_field: crate::rules::Field::Host,
             sr_op: crate::rules::Op::Contains,
@@ -1408,6 +1962,15 @@ impl ScryApp {
             mr_find,
             mr_replace,
             mr_regex: false,
+            map_kind: 0,
+            map_match,
+            map_to,
+            map_status,
+            map_body,
+            ws_rules,
+            ws_rule_to_server: true,
+            ws_rule_find,
+            ws_rule_replace,
             insp_tab: InspTab::Inspector,
             insp_open: [true, true, false, false],
             rail: 0,
@@ -1432,12 +1995,19 @@ impl ScryApp {
             scan_paused: false,
             scan_rx: None,
             scan_ctrl: None,
+            oob_busy: false,
+            oob_server_idx: 0,
+            oob_server_open: false,
+            oob_status: None,
+            oob_rx: None,
+            oob_ctrl: None,
             sqli_target,
             sqli_req,
             sqli_point_sel: 0,
             sqli_point_open: false,
             sqli_secs: 3,
             sqli_secs_open: false,
+            sqli_dump: true,
             sqli_busy: false,
             sqli_progress: None,
             sqli_log: Vec::new(),
@@ -1456,6 +2026,7 @@ impl ScryApp {
             xss_rx: None,
             xss_ctrl: None,
             xss_dom: false,
+            xss_stored: false,
             xss_child: None,
             authz_target,
             authz_req,
@@ -1469,6 +2040,45 @@ impl ScryApp {
             authz_ran: false,
             authz_rx: None,
             authz_ctrl: None,
+            race_target,
+            race_req,
+            race_count: 20,
+            race_mode_sync: true,
+            race_busy: false,
+            race_progress: None,
+            race_log: Vec::new(),
+            race_results: Vec::new(),
+            race_summary: None,
+            race_ran: false,
+            race_rx: None,
+            nuclei_target,
+            nuclei_dir,
+            nuclei_sev: 0,
+            nuclei_sev_open: false,
+            nuclei_busy: false,
+            nuclei_progress: None,
+            nuclei_log: Vec::new(),
+            nuclei_hits: Vec::new(),
+            nuclei_loaded: 0,
+            nuclei_skipped: 0,
+            nuclei_ran: false,
+            nuclei_rx: None,
+            nuclei_ctrl: None,
+            session_target,
+            session_macro,
+            session_token_regex,
+            session_token_header,
+            session_logout_body,
+            session_capture_cookies: true,
+            session_apply: false,
+            session_busy: false,
+            session_active: None,
+            session_status: None,
+            session_msg: None,
+            session_log: Vec::new(),
+            session_rx: None,
+            sitemap_expanded: std::collections::HashSet::new(),
+            sitemap_selected: None,
             crawl_seed,
             crawl_depth: 2,
             crawl_pages: 60,
@@ -1480,6 +2090,8 @@ impl ScryApp {
             crawl_ctrl: None,
             crawl_visited: Vec::new(),
             crawl_child: None,
+            crawl_then_audit: false,
+            crawl_audit_host: None,
             it_target,
             it_req,
             it_payloads,
@@ -1517,6 +2129,38 @@ impl ScryApp {
             dec_iv,
             dec_note: None,
             dec_err: false,
+            jwt_input,
+            jwt_payload,
+            jwt_secret,
+            jwt_kid,
+            jwt_out,
+            jwt_crack: None,
+            jwt_msg: None,
+            compose_target,
+            compose_req,
+            compose_resp: None,
+            compose_err: None,
+            compose_sending: false,
+            compose_resp_view: MsgView::Pretty,
+            compose_resp_input,
+            compose_resp_sig: u64::MAX,
+            compose_env,
+            compose_env_name,
+            compose_env_value,
+            compose_saved,
+            compose_name,
+            graphql_endpoint,
+            graphql_query,
+            graphql_vars,
+            graphql_headers,
+            graphql_resp: None,
+            graphql_err: None,
+            graphql_sending: false,
+            graphql_resp_view: MsgView::Pretty,
+            graphql_resp_input,
+            graphql_resp_sig: u64::MAX,
+            graphql_schema: None,
+            graphql_msg: None,
             cmp_a,
             cmp_b,
             cmp_gran: scry_diff::Granularity::Line,
@@ -1529,7 +2173,6 @@ impl ScryApp {
             capture_stop: None,
             sniff_stop: None,
             flow_rx: None,
-            prog_input,
             launched: Vec::new(),
             hist_scroll: UniformListScrollHandle::new(),
             host_filter: None,
@@ -1538,8 +2181,20 @@ impl ScryApp {
             iface_sel: 0,
             iface_open: false,
             pcapng_enabled: false,
+            chromium_downloading: false,
             tls_profile_sel: 0,
             tls_profile_open: false,
+            throttle_sel: 0,
+            throttle_open: false,
+            proxy_port,
+            proxy_lan: cfg_lan,
+            ws_rep_url,
+            ws_rep_send,
+            ws_rep_msgs: Vec::new(),
+            ws_rep_connected: false,
+            ws_rep_status: None,
+            ws_rep_cmd_tx: None,
+            ws_rep_evt_rx: None,
             demo,
             cert_status: CertStatus::Unknown,
             cert_msg: None,
@@ -1594,6 +2249,8 @@ impl ScryApp {
         self.authz_low.update(cx, |s, cx| {
             s.set_placeholder(l.t("Header: value per line (optional)"), cx)
         });
+        self.race_target
+            .update(cx, |s, cx| s.set_placeholder(l.t("https://host[:port]"), cx));
         self.it_match
             .update(cx, |s, cx| s.set_placeholder(l.t("Grep match (optional)"), cx));
         self.crawl_seed.update(cx, |s, cx| {

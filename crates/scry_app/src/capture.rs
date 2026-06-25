@@ -82,14 +82,30 @@ impl ScryApp {
                 self.push_log(
                     LogLevel::Success,
                     "capture",
-                    format!("内核抓包已启动 · 网卡 {iface_name}(HTTPS 仅 SNI)"),
+                    format!(
+                        "内核抓包已启动 · 网卡 {iface_name}(HTTPS 仅 SNI · HTTP/3/QUIC 仅 SNI/ALPN)"
+                    ),
                 );
                 if let Some(p) = pcapng_log {
                     self.push_log(LogLevel::Info, "capture", format!("pcapng 同步保存到 {p}"));
                 }
             }
             CaptureMode::Proxy => {
-                let addr = ProxyConfig::default().addr;
+                // 监听端口 / 绑定地址可配:局域网开关 = 绑 0.0.0.0(同 Wi‑Fi 的手机等设备可连),否则仅本机。
+                let port: u16 = self
+                    .proxy_port
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|p| *p > 0)
+                    .unwrap_or(8888);
+                let bind_ip = if self.proxy_lan { "0.0.0.0" } else { "127.0.0.1" };
+                let addr: std::net::SocketAddr = format!("{bind_ip}:{port}")
+                    .parse()
+                    .unwrap_or_else(|_| ProxyConfig::default().addr);
+                save_net_cfg(port, self.proxy_lan); // 持久化:下次启动自动恢复
                 if std::net::TcpListener::bind(addr).is_err() {
                     let msg = format!("端口 {addr} 被占用,无法启动代理抓包");
                     self.push_log(LogLevel::Error, "capture", msg.clone());
@@ -128,8 +144,17 @@ impl ScryApp {
                 self.sync_rules_to_engine();
                 // 注入扩展钩子:proxy 线程在三个接缝回调 ExtRegistry(经 Arc 共享)。
                 let proxy_cfg = ProxyConfig {
+                    addr,
                     upstream,
                     hooks: Some(scry_proxy::ExtHooks(self.ext.clone())),
+                    // 弱网/限速:选中非 Off 档则注入(回写客户端时延迟 + 限带宽)。
+                    throttle: scry_proxy::throttle::PRESETS
+                        .get(self.throttle_sel)
+                        .map(|(_, t)| *t)
+                        .filter(|t| !t.is_noop()),
+                    // 活动 WS 改帧规则:非空则注入(升级的 WS 连接走解帧改写转发);空 = 字节透传。
+                    ws_rewrite: (!self.ws_rules.is_empty())
+                        .then(|| std::sync::Arc::new(self.ws_rules.clone())),
                     ..ProxyConfig::default()
                 };
                 std::thread::Builder::new()
@@ -156,10 +181,18 @@ impl ScryApp {
                     })
                     .ok();
                 self.capture_stop = Some(stop_tx);
+                let lan_note = if self.proxy_lan {
+                    match lan_ip() {
+                        Some(ip) => format!(" · 局域网设备代理 {ip}:{port}"),
+                        None => " · 已允许局域网设备".to_string(),
+                    }
+                } else {
+                    String::new()
+                };
                 self.push_log(
                     LogLevel::Success,
                     "capture",
-                    format!("MITM 代理已启动 · 监听 {addr} · {up_note}"),
+                    format!("MITM 代理已启动 · 监听 {addr} · {up_note}{lan_note}"),
                 );
             }
         }
@@ -360,6 +393,49 @@ impl ScryApp {
         self.push_log(LogLevel::Info, "capture", "已清空历史与数据库");
         cx.notify();
     }
+}
+
+/// 代理监听配置存盘:`~/.scry/proxy.json`(监听端口 + 是否允许局域网设备)。
+fn net_cfg_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".scry").join("proxy.json")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NetCfg {
+    /// 代理监听端口(默认 8888)。
+    port: u16,
+    /// 是否绑 0.0.0.0 允许局域网设备(手机)连。
+    lan: bool,
+}
+
+/// 读监听配置(文件不存在 / 损坏 → 默认 8888 + 仅本机)。供 `ScryApp::new` 启动恢复。
+pub fn load_net_cfg() -> (u16, bool) {
+    match std::fs::read_to_string(net_cfg_path()) {
+        Ok(s) => match serde_json::from_str::<NetCfg>(&s) {
+            Ok(c) => (if c.port == 0 { 8888 } else { c.port }, c.lan),
+            Err(_) => (8888, false),
+        },
+        Err(_) => (8888, false),
+    }
+}
+
+/// 保存监听配置;best-effort,失败静默。
+pub fn save_net_cfg(port: u16, lan: bool) {
+    let path = net_cfg_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&NetCfg { port, lan }) {
+        let _ = std::fs::write(&path, s);
+    }
+}
+
+/// 本机局域网出口 IP(UDP `connect` 到公网地址仅为查路由出口,不实际发包)。供手机配置代理时显示。
+pub fn lan_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
 }
 
 /// 生成 pcapng 落盘路径:`~/.scry/capture-<unixsecs>.pcapng`(确保目录存在)。

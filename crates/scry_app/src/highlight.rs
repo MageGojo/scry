@@ -206,6 +206,24 @@ fn decode_lines(headers: &[(String, String)], body: &[u8], max: usize, lang: Lan
         Line::Tokens(toks.into_iter().map(|(s, k)| (SharedString::from(s), k)).collect())
     };
 
+    // gRPC / Protobuf:按 content-type 渲染为字段树(无 schema 的 wire 解码)。
+    let ct = scry_decode::header_get(headers, "content-type")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ct.contains("grpc") || ct.contains("protobuf") {
+        let raw = scry_decode::decode_body(headers, body);
+        let tree = if ct.contains("grpc") {
+            scry_codec::protobuf::decode_grpc_to_text(&raw)
+        } else {
+            scry_codec::protobuf::decode_to_text(&raw)
+        };
+        if let Some(tree) = tree {
+            return capped_to_lines(&tree, max, body.len(), lang, |line| {
+                Line::Plain(SharedString::from(line))
+            });
+        }
+    }
+
     if let Some(pretty) = scry_decode::display_pretty_json(headers, body) {
         return capped_to_lines(&pretty, max, body.len(), lang, |line| {
             intern(tokenize_json_line(line))

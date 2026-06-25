@@ -53,7 +53,7 @@ impl ScryApp {
     }
 
     /// 按当前目标筛出要扫描的流(`scan_target = None` 时为全部)。
-    fn scoped_flows(&self) -> Vec<HttpFlow> {
+    pub(crate) fn scoped_flows(&self) -> Vec<HttpFlow> {
         match &self.scan_target {
             Some(host) => self.flows.iter().filter(|f| &f.host == host).cloned().collect(),
             None => self.flows.clone(),
@@ -209,6 +209,267 @@ impl ScryApp {
                 cx.background_executor()
                     .timer(Duration::from_millis(120))
                     .await;
+                let keep_going = this.update(cx, |this, cx| {
+                    this.drain_scan_results();
+                    cx.notify();
+                    this.scan_busy
+                });
+                match keep_going {
+                    Ok(true) => continue,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Param Miner:对当前目标的 GET 端点逐批塞内置参数字典(金丝雀),响应反射金丝雀即发现隐藏参数。
+    /// 复用主动扫描的 busy / 暂停 / 停止 / 进度 / findings 通道;发现进 `scan_findings`(可被报告聚合)。
+    pub fn run_param_miner(&mut self, cx: &mut Context<Self>) {
+        if self.scan_busy {
+            return;
+        }
+        const BATCH: usize = 20;
+        const TARGET_CAP: usize = 12;
+        let mut seen = std::collections::HashSet::new();
+        let mut plan: Vec<(HttpFlow, Vec<String>)> = Vec::new();
+        for f in self.scoped_flows() {
+            if !f.method.eq_ignore_ascii_case("GET") || !seen.insert(f.url()) {
+                continue;
+            }
+            // 排除原请求里已有的参数名(只挖「隐藏」的)。
+            let existing: std::collections::HashSet<String> = f
+                .path
+                .split_once('?')
+                .map(|(_, q)| {
+                    q.split('&')
+                        .filter_map(|kv| kv.split('=').next())
+                        .map(|k| k.to_ascii_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let words: Vec<String> = scry_scan::PARAM_WORDLIST
+                .iter()
+                .filter(|w| !existing.contains(&w.to_ascii_lowercase()))
+                .map(|w| w.to_string())
+                .collect();
+            if !words.is_empty() {
+                plan.push((f, words));
+            }
+            if plan.len() >= TARGET_CAP {
+                break;
+            }
+        }
+        let total: usize = plan.iter().map(|(_, w)| w.len().div_ceil(BATCH)).sum();
+        if total == 0 {
+            self.push_log(LogLevel::Warning, "scan", "参数挖掘跳过:目标下无 GET 端点".to_string());
+            self.scan_progress = Some(
+                if self.lang.is_zh() { "无可挖掘的 GET 端点" } else { "No GET endpoints to mine" }
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        }
+
+        self.scan_busy = true;
+        self.scan_paused = false;
+        self.scan_total = total;
+        self.scan_done = 0;
+        self.scan_ran = true;
+        self.scan_progress = Some(format!("0 / {total}"));
+        self.push_log(
+            LogLevel::Info,
+            "scan",
+            format!("参数挖掘开始 · {} 端点 · {total} 批", plan.len()),
+        );
+
+        let up = self.upstream_proxy(cx);
+        let ctrl = Arc::new(AtomicU8::new(SCAN_RUN));
+        self.scan_ctrl = Some(ctrl.clone());
+        let (tx, rx) = mpsc::channel::<ScanMsg>();
+        self.scan_rx = Some(rx);
+        cx.notify();
+
+        cx.background_executor()
+            .spawn(async move {
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                rt.block_on(async move {
+                    let cfg = ReplayConfig { upstream: up, ..Default::default() };
+                    let mut completed = 0usize;
+                    for (ep_idx, (flow, words)) in plan.iter().enumerate() {
+                        for (b_idx, batch) in words.chunks(BATCH).enumerate() {
+                            loop {
+                                match ctrl.load(Ordering::Relaxed) {
+                                    SCAN_STOP => return,
+                                    SCAN_PAUSE => {
+                                        tokio::time::sleep(Duration::from_millis(120)).await;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            let batch_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                            let seed = ((ep_idx as u64) << 16) | b_idx as u64;
+                            let probes = scry_scan::make_probes(&batch_refs, seed);
+                            let mut req = ReplayRequest::from_flow(flow);
+                            req.path = scry_scan::inject_query(&req.path, &probes);
+                            completed += 1;
+                            let findings: Vec<Finding> = match replay::send(&req, &cfg).await {
+                                Ok(resp) => {
+                                    let text = scry_decode::display_text(
+                                        &resp.resp_headers,
+                                        &resp.resp_body,
+                                    );
+                                    let refl = scry_scan::reflected(&text, &probes);
+                                    if scry_scan::param_miner::looks_like_url_echo(
+                                        refl.len(),
+                                        probes.len(),
+                                    ) {
+                                        Vec::new()
+                                    } else {
+                                        refl.iter()
+                                            .map(|name| {
+                                                Finding::new(
+                                                    "hidden-param",
+                                                    "Hidden parameter discovered",
+                                                    scry_scan::Severity::Low,
+                                                    flow.url(),
+                                                    format!("Parameter '{name}' is processed/reflected by the server (not in the original request)"),
+                                                )
+                                            })
+                                            .collect()
+                                    }
+                                }
+                                Err(_) => Vec::new(),
+                            };
+                            if findings.is_empty() {
+                                if tx.send(ScanMsg { done: completed, finding: None }).is_err() {
+                                    return;
+                                }
+                            } else {
+                                for f in findings {
+                                    if tx
+                                        .send(ScanMsg { done: completed, finding: Some(f) })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            })
+            .detach();
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(120)).await;
+                let keep_going = this.update(cx, |this, cx| {
+                    this.drain_scan_results();
+                    cx.notify();
+                    this.scan_busy
+                });
+                match keep_going {
+                    Ok(true) => continue,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// HTTP 请求走私检测(CL.TE / TE.CL,**计时法**):对当前目标去重主机逐个发畸形请求,
+    /// 响应显著延迟(后端被卡住)= 疑似走私。**侵入性**且较慢;复用主动扫描进度 / 暂停 / 停止通道。
+    pub fn run_smuggle_scan(&mut self, cx: &mut Context<Self>) {
+        if self.scan_busy {
+            return;
+        }
+        const HOST_CAP: usize = 6;
+        let mut seen = std::collections::HashSet::new();
+        let mut targets: Vec<(String, u16, bool, String)> = Vec::new();
+        for f in self.scoped_flows() {
+            if seen.insert(f.host.clone()) {
+                let path = if f.path.is_empty() { "/".to_string() } else { f.path.clone() };
+                targets.push((f.host.clone(), f.port, f.scheme.eq_ignore_ascii_case("https"), path));
+            }
+            if targets.len() >= HOST_CAP {
+                break;
+            }
+        }
+        if targets.is_empty() {
+            self.push_log(LogLevel::Warning, "scan", "请求走私检测跳过:无目标主机".to_string());
+            cx.notify();
+            return;
+        }
+        let total = targets.len();
+        self.scan_busy = true;
+        self.scan_paused = false;
+        self.scan_total = total;
+        self.scan_done = 0;
+        self.scan_ran = true;
+        self.scan_progress = Some(format!("0 / {total}"));
+        self.push_log(
+            LogLevel::Info,
+            "scan",
+            format!("请求走私检测开始 · {total} 主机(计时法,较慢)"),
+        );
+
+        let up = self.upstream_proxy(cx);
+        let ctrl = Arc::new(AtomicU8::new(SCAN_RUN));
+        self.scan_ctrl = Some(ctrl.clone());
+        let (tx, rx) = mpsc::channel::<ScanMsg>();
+        self.scan_rx = Some(rx);
+        cx.notify();
+
+        cx.background_executor()
+            .spawn(async move {
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                rt.block_on(async move {
+                    let cfg = scry_proxy::smuggle::SmuggleConfig { upstream: up, ..Default::default() };
+                    for (i, (host, port, secure, path)) in targets.iter().enumerate() {
+                        loop {
+                            match ctrl.load(Ordering::Relaxed) {
+                                SCAN_STOP => return,
+                                SCAN_PAUSE => {
+                                    tokio::time::sleep(Duration::from_millis(120)).await;
+                                }
+                                _ => break,
+                            }
+                        }
+                        let hits = scry_proxy::smuggle::probe(host, *port, *secure, path, &cfg).await;
+                        let url = format!("{}://{}", if *secure { "https" } else { "http" }, host);
+                        if hits.is_empty() {
+                            if tx.send(ScanMsg { done: i + 1, finding: None }).is_err() {
+                                return;
+                            }
+                        } else {
+                            for kind in &hits {
+                                let f = Finding::new(
+                                    "request-smuggling",
+                                    "Possible HTTP request smuggling (timing)",
+                                    scry_scan::Severity::High,
+                                    url.clone(),
+                                    format!("{} timing anomaly — verify manually (intrusive)", kind.label()),
+                                );
+                                if tx.send(ScanMsg { done: i + 1, finding: Some(f) }).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+            })
+            .detach();
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(150)).await;
                 let keep_going = this.update(cx, |this, cx| {
                     this.drain_scan_results();
                     cx.notify();
@@ -562,7 +823,64 @@ impl ScryApp {
                         .size(ButtonSize::Sm)
                         .icon(IconName::Folder)
                         .on_click(cx.listener(|this, _e, _w, cx| this.run_discovery_scan(cx))),
+                )
+                .child(
+                    Button::new("scan-parammine", self.lang.t("Param miner"))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Sm)
+                        .icon(IconName::Search)
+                        .on_click(cx.listener(|this, _e, _w, cx| this.run_param_miner(cx))),
+                )
+                .child(
+                    Button::new("scan-smuggle", self.lang.t("Request smuggling"))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Sm)
+                        .icon(IconName::Layers)
+                        .on_click(cx.listener(|this, _e, _w, cx| this.run_smuggle_scan(cx))),
                 );
+        }
+
+        // OOB 带外盲注扫描(interactsh;独立 busy 状态,与主动扫描互斥)。
+        if self.oob_busy {
+            controls = controls.child(
+                Button::new("oob-stop", self.lang.t("Stop OOB"))
+                    .variant(ButtonVariant::Danger)
+                    .size(ButtonSize::Sm)
+                    .icon(IconName::Globe)
+                    .on_click(cx.listener(|this, _e, _w, cx| this.stop_oob_scan(cx))),
+            );
+        } else if !self.scan_busy {
+            let servers: Vec<SharedString> = scry_oob::PUBLIC_SERVERS
+                .iter()
+                .map(|s| SharedString::from(*s))
+                .collect();
+            let view_ot = cx.entity();
+            let view_os = cx.entity();
+            let oob_select = Select::new("oob-server", servers, self.oob_server_idx)
+                .width(px(120.0))
+                .open(self.oob_server_open)
+                .on_toggle(move |_e, _w, app| {
+                    view_ot.update(app, |this, cx| {
+                        this.oob_server_open = !this.oob_server_open;
+                        cx.notify();
+                    });
+                })
+                .on_select(move |i, _e, _w, app| {
+                    view_os.update(app, |this, cx| {
+                        this.oob_server_idx = i;
+                        this.oob_server_open = false;
+                        cx.notify();
+                    });
+                });
+            controls = controls
+                .child(
+                    Button::new("scan-oob", self.lang.t("OOB blind scan"))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Sm)
+                        .icon(IconName::Globe)
+                        .on_click(cx.listener(|this, _e, _w, cx| this.run_oob_scan(cx))),
+                )
+                .child(oob_select);
         }
 
         let mut toolbar = div()
@@ -578,6 +896,14 @@ impl ScryApp {
                     .text_size(t.font_size.xs)
                     .text_color(if self.scan_busy { c.warning } else { c.text_muted })
                     .child(prog.clone()),
+            );
+        }
+        if let Some(s) = &self.oob_status {
+            toolbar = toolbar.child(
+                div()
+                    .text_size(t.font_size.xs)
+                    .text_color(if self.oob_busy { c.accent } else { c.text_muted })
+                    .child(s.clone()),
             );
         }
 
@@ -652,7 +978,7 @@ impl ScryApp {
 }
 
 /// 合并后去重 + 排序(被动 + 主动 findings 统一口径)。
-fn merge_sort_findings(v: &mut Vec<Finding>) {
+pub(crate) fn merge_sort_findings(v: &mut Vec<Finding>) {
     v.sort_by(|a, b| (a.rule_id, &a.url).cmp(&(b.rule_id, &b.url)));
     v.dedup_by(|a, b| a.rule_id == b.rule_id && a.url == b.url);
     v.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.url.cmp(&b.url)));

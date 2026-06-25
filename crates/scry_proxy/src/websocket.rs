@@ -46,6 +46,19 @@ impl OpCode {
         }
     }
 
+    /// 回到低 4 位 opcode 字段(编码帧用)。
+    pub fn to_u8(self) -> u8 {
+        match self {
+            OpCode::Continuation => 0x0,
+            OpCode::Text => 0x1,
+            OpCode::Binary => 0x2,
+            OpCode::Close => 0x8,
+            OpCode::Ping => 0x9,
+            OpCode::Pong => 0xA,
+            OpCode::Other(v) => v & 0x0f,
+        }
+    }
+
     /// 是否 control 帧(close/ping/pong;opcode 高位 0x8)——不参与分片聚合。
     pub fn is_control(self) -> bool {
         matches!(self, OpCode::Close | OpCode::Ping | OpCode::Pong)
@@ -237,6 +250,89 @@ pub fn is_switching_response(status: u16, headers: &[(String, String)]) -> bool 
         })
 }
 
+// ───────────────────────── 活动 WS 改帧(对标 Burp WebSockets intercept)─────────────────────────
+//
+// 默认 WS 转发是**字节透传**(零破坏)。当配置了改写规则时,转发路径切到「解帧 → 文本帧按规则替换 →
+// 重编码 → 转发」(见 `mitm::pump_ws`)。规则为空 = 完全走老的透传路径,行为不变。
+
+/// 改写规则作用的方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsRuleDir {
+    /// 客户端 → 服务端(出站帧;重编码时必须 mask)。
+    ToServer,
+    /// 服务端 → 客户端(入站帧;重编码时不 mask)。
+    ToClient,
+}
+
+/// 一条 WS 文本帧改写规则(字面量 `find` → `replace`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsRewriteRule {
+    pub dir: WsRuleDir,
+    pub find: String,
+    pub replace: String,
+}
+
+/// 对某方向的一个**文本帧 payload** 施加所有匹配方向的规则(字面量替换)。
+///
+/// 仅处理合法 UTF-8 文本(非 UTF-8 / 二进制返回 `None` 跳过);无任何命中也返回 `None`(调用方原样转发)。
+pub fn rewrite_text(dir: WsRuleDir, payload: &[u8], rules: &[WsRewriteRule]) -> Option<Vec<u8>> {
+    let s = std::str::from_utf8(payload).ok()?;
+    let mut cur = std::borrow::Cow::Borrowed(s);
+    let mut changed = false;
+    for r in rules.iter().filter(|r| r.dir == dir) {
+        if !r.find.is_empty() && cur.contains(&r.find) {
+            cur = std::borrow::Cow::Owned(cur.replace(&r.find, &r.replace));
+            changed = true;
+        }
+    }
+    changed.then(|| cur.into_owned().into_bytes())
+}
+
+/// 该方向是否有任何改写规则(决定是否切到「解帧改写」转发模式)。
+pub fn has_rules_for(dir: WsRuleDir, rules: &[WsRewriteRule]) -> bool {
+    rules.iter().any(|r| r.dir == dir)
+}
+
+/// 生成 4 字节掩码(非加密随机,仅满足 RFC 6455 客户端帧需 mask 的要求;复用 `RandomState` + 纳秒)。
+fn rand_mask() -> [u8; 4] {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    h.write_u64(nanos);
+    let v = h.finish() ^ nanos;
+    v.to_le_bytes()[..4].try_into().unwrap_or([0x37, 0xfa, 0x21, 0x3d])
+}
+
+/// 编码一个 WS 帧(`mask=true` 时随机掩码,用于客户端→服务端方向)。
+pub fn encode_frame(fin: bool, opcode: OpCode, payload: &[u8], mask: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 14);
+    out.push((if fin { 0x80 } else { 0 }) | (opcode.to_u8() & 0x0f));
+    let len = payload.len();
+    let mask_bit = if mask { 0x80 } else { 0 };
+    if len <= 125 {
+        out.push(mask_bit | len as u8);
+    } else if len <= 0xffff {
+        out.push(mask_bit | 126);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        out.push(mask_bit | 127);
+        out.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    if mask {
+        let key = rand_mask();
+        out.extend_from_slice(&key);
+        for (i, b) in payload.iter().enumerate() {
+            out.push(b ^ key[i % 4]);
+        }
+    } else {
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +467,74 @@ mod tests {
         let resp = vec![("Upgrade".to_string(), "websocket".to_string())];
         assert!(is_switching_response(101, &resp));
         assert!(!is_switching_response(200, &resp));
+    }
+
+    #[test]
+    fn rewrite_text_applies_matching_direction() {
+        let rules = vec![
+            WsRewriteRule {
+                dir: WsRuleDir::ToServer,
+                find: "ping".into(),
+                replace: "PWN".into(),
+            },
+            WsRewriteRule {
+                dir: WsRuleDir::ToClient,
+                find: "balance".into(),
+                replace: "BIG".into(),
+            },
+        ];
+        // 出站方向命中 ToServer 规则。
+        assert_eq!(
+            rewrite_text(WsRuleDir::ToServer, b"{\"type\":\"ping\"}", &rules).unwrap(),
+            b"{\"type\":\"PWN\"}"
+        );
+        // 出站方向不应命中 ToClient 规则。
+        assert!(rewrite_text(WsRuleDir::ToServer, b"my balance", &rules).is_none());
+        // 入站方向命中 ToClient 规则。
+        assert_eq!(
+            rewrite_text(WsRuleDir::ToClient, b"my balance", &rules).unwrap(),
+            b"my BIG"
+        );
+        // 无命中返回 None(原样转发)。
+        assert!(rewrite_text(WsRuleDir::ToClient, b"nothing here", &rules).is_none());
+        // 非 UTF-8 跳过。
+        assert!(rewrite_text(WsRuleDir::ToServer, &[0xff, 0xfe], &rules).is_none());
+    }
+
+    #[test]
+    fn has_rules_for_checks_direction() {
+        let rules = vec![WsRewriteRule {
+            dir: WsRuleDir::ToServer,
+            find: "a".into(),
+            replace: "b".into(),
+        }];
+        assert!(has_rules_for(WsRuleDir::ToServer, &rules));
+        assert!(!has_rules_for(WsRuleDir::ToClient, &rules));
+    }
+
+    #[test]
+    fn encode_frame_roundtrips_masked_and_unmasked() {
+        // 不 mask(服务端→客户端):解码器应原样取回。
+        let bytes = encode_frame(true, OpCode::Text, b"hello", false);
+        assert_eq!(bytes[1] & 0x80, 0, "未 mask");
+        let mut d = FrameDecoder::new();
+        d.feed(&bytes);
+        let f = d.next_frame().unwrap();
+        assert_eq!(f.opcode, OpCode::Text);
+        assert_eq!(f.payload, b"hello");
+
+        // mask(客户端→服务端):mask 位置 1,解码器解 mask 后还原明文。
+        let masked = encode_frame(true, OpCode::Text, b"client msg", true);
+        assert_eq!(masked[1] & 0x80, 0x80, "客户端帧必须 mask");
+        let mut d2 = FrameDecoder::new();
+        d2.feed(&masked);
+        assert_eq!(d2.next_frame().unwrap().payload, b"client msg");
+
+        // 扩展长度(>125)。
+        let big = vec![b'x'; 300];
+        let ef = encode_frame(true, OpCode::Binary, &big, false);
+        let mut d3 = FrameDecoder::new();
+        d3.feed(&ef);
+        assert_eq!(d3.next_frame().unwrap().payload.len(), 300);
     }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "scry_quic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scry QUIC(HTTP/3)被动可见性内核:无需密钥解密 Initial 包提取 SNI/ALPN(RFC 9001 公开盐),纯函数可单测"
+
+[dependencies]
+# QUIC v1 Initial 解密:AES-128-GCM(载荷)+ AES-ECB(头保护采样)+ HKDF(SHA-256)。纯 Rust,免 cmake。
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+sha2 = { workspace = true }

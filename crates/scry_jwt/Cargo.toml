@@ -1,0 +1,10 @@
+[package]
+name = "scry_jwt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Scry JWT 攻击套件内核(对标 Burp JWT Editor):解码 + alg:none / 弱密钥 HS256 伪造 / kid 注入 / 弱密钥爆破(纯函数,RustCrypto sha2)"
+
+[dependencies]
+sha2 = { workspace = true }

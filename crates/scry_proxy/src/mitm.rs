@@ -45,13 +45,21 @@ pub async fn intercept_https(
             .await?;
     }
 
+    // Map Remote:连上游前询问扩展/规则是否把目标重定向到别处(叶子证书仍按**原** host 签发,
+    // 客户端无感知;flow 记录也保留原 host 便于历史展示)。
+    let (target_host, target_port) = cfg
+        .hooks
+        .as_ref()
+        .and_then(|h| h.0.remap_target(&host, port))
+        .unwrap_or_else(|| (host.clone(), port));
+
     // ── 先对上游握手:拿到 ALPN 协商结果,据此决定给客户端提议什么协议 ──
     // 顺序很关键:server ALPN **跟随上游** → 两端永远同协议(h2↔h2 / h1↔h1),免去 h1/h2 跨协议桥接。
-    let upstream_tcp = connect_via(host.as_str(), port, cfg.upstream.as_ref())
+    let upstream_tcp = connect_via(target_host.as_str(), target_port, cfg.upstream.as_ref())
         .await
-        .with_context(|| format!("连接上游 {host}:{port} 失败"))?;
+        .with_context(|| format!("连接上游 {target_host}:{target_port} 失败"))?;
     let connector = TlsConnector::from(Arc::new(build_client_config()?));
-    let server_name = ServerName::try_from(host.clone()).context("无效 SNI")?;
+    let server_name = ServerName::try_from(target_host.clone()).context("无效 SNI")?;
     let upstream_tls = connector
         .connect(server_name, upstream_tcp)
         .await
@@ -114,7 +122,15 @@ pub async fn intercept_https(
 
     // WebSocket 升级:走专用双向抓取路径。普通 HTTP 的「读一个响应」模型遇到 101 + 长连接帧流会卡死到超时。
     if crate::websocket::is_upgrade_request(&flow.req_headers) {
-        return handle_websocket(client_tls, upstream_tls, flow, started, store).await;
+        return handle_websocket(
+            client_tls,
+            upstream_tls,
+            flow,
+            started,
+            store,
+            cfg.ws_rewrite.clone(),
+        )
+        .await;
     }
 
     let outbound =
@@ -166,8 +182,8 @@ pub async fn intercept_https(
     }
 
     let out = rebuilt.as_deref().unwrap_or(&resp.raw);
-    client_tls.write_all(out).await?;
-    client_tls.flush().await?;
+    // 按弱网/限速档注入延迟 + 带宽上限回写客户端(无档 = 直发,零开销)。
+    crate::throttle::write_throttled(&mut client_tls, out, cfg.throttle.as_ref()).await?;
     Ok(())
 }
 
@@ -312,12 +328,16 @@ where
 }
 
 /// WebSocket 升级:转发握手 → 读 101 响应头回灌客户端 → 双向「字节透传 + 旁路抓取」。
+///
+/// `ws_rewrite` 非空(且该方向有规则)时,该方向改走「解帧 → 文本帧改写 → 重编码 → 转发」模式
+/// (对标 Burp WebSockets intercept);否则仍是零破坏的字节透传。
 async fn handle_websocket(
     mut client_tls: tokio_rustls::server::TlsStream<TcpStream>,
     mut upstream_tls: tokio_rustls::client::TlsStream<TcpStream>,
     mut flow: HttpFlow,
     started: Instant,
     store: SharedStore,
+    ws_rewrite: Option<Arc<Vec<crate::websocket::WsRewriteRule>>>,
 ) -> Result<()> {
     // 原样转发握手请求(保留升级头)。
     let handshake =
@@ -364,29 +384,144 @@ async fn handle_websocket(
     let path = flow.path.clone();
     let (cr, cw) = tokio::io::split(client_tls);
     let (ur, uw) = tokio::io::split(upstream_tls);
-    let c2s = pump_ws(
-        cr,
-        uw,
-        WsDirection::ClientToServer,
-        Vec::new(),
-        store.clone(),
-        conn_id,
-        host.clone(),
-        path.clone(),
-    );
-    let s2c = pump_ws(
-        ur,
-        cw,
-        WsDirection::ServerToClient,
-        leftover,
-        store.clone(),
-        conn_id,
-        host,
-        path,
-    );
+    // 无规则 = 空 Arc → 各方向走零破坏的字节透传(行为与改动前完全一致)。
+    let rewrite = ws_rewrite.unwrap_or_default();
+
+    // 客户端 → 服务端(出站,重编码需 mask)。
+    let r1 = rewrite.clone();
+    let (h1, p1, s1) = (host.clone(), path.clone(), store.clone());
+    let c2s = async move {
+        if crate::websocket::has_rules_for(crate::websocket::WsRuleDir::ToServer, &r1) {
+            pump_ws_rewrite(
+                cr, uw, WsDirection::ClientToServer, Vec::new(), s1, conn_id, h1, p1, r1,
+                crate::websocket::WsRuleDir::ToServer, true,
+            )
+            .await
+        } else {
+            pump_ws(cr, uw, WsDirection::ClientToServer, Vec::new(), s1, conn_id, h1, p1).await
+        }
+    };
+
+    // 服务端 → 客户端(入站,不 mask)。
+    let r2 = rewrite;
+    let s2c = async move {
+        if crate::websocket::has_rules_for(crate::websocket::WsRuleDir::ToClient, &r2) {
+            pump_ws_rewrite(
+                ur, cw, WsDirection::ServerToClient, leftover, store, conn_id, host, path, r2,
+                crate::websocket::WsRuleDir::ToClient, false,
+            )
+            .await
+        } else {
+            pump_ws(ur, cw, WsDirection::ServerToClient, leftover, store, conn_id, host, path).await
+        }
+    };
+
     tokio::select! {
         _ = c2s => {}
         _ = s2c => {}
+    }
+    Ok(())
+}
+
+/// 单方向泵(**帧改写模式**):解帧 → 完整文本帧按规则字面量替换 → 重编码(按方向 mask)→ 转发,
+/// 并记录改写后的消息。分片 / 二进制 / 控制帧原样重编码转发(不改内容)。
+///
+/// 与透传 [`pump_ws`] 互斥:仅当该方向配置了改写规则时启用(见 [`handle_websocket`])。
+#[allow(clippy::too_many_arguments)]
+async fn pump_ws_rewrite<R, W>(
+    mut rd: R,
+    mut wr: W,
+    direction: WsDirection,
+    initial: Vec<u8>,
+    store: SharedStore,
+    conn_id: i64,
+    host: String,
+    path: String,
+    rules: Arc<Vec<crate::websocket::WsRewriteRule>>,
+    ws_dir: crate::websocket::WsRuleDir,
+    mask_out: bool,
+) -> Result<()>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    let mut decoder = crate::websocket::FrameDecoder::new();
+    let mut assembler = crate::websocket::Assembler::new();
+
+    if !initial.is_empty()
+        && forward_frames(
+            &mut decoder, &mut assembler, &initial, &mut wr, &store, conn_id, &host, &path,
+            direction, &rules, ws_dir, mask_out,
+        )
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let mut tmp = [0u8; 16384];
+    loop {
+        let n = match rd.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if forward_frames(
+            &mut decoder, &mut assembler, &tmp[..n], &mut wr, &store, conn_id, &host, &path,
+            direction, &rules, ws_dir, mask_out,
+        )
+        .await
+        .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// 喂新字节 → 逐完整帧改写 + 重编码转发 + 记录(帧改写模式的核心)。
+#[allow(clippy::too_many_arguments)]
+async fn forward_frames<W>(
+    decoder: &mut crate::websocket::FrameDecoder,
+    assembler: &mut crate::websocket::Assembler,
+    new_bytes: &[u8],
+    wr: &mut W,
+    store: &SharedStore,
+    conn_id: i64,
+    host: &str,
+    path: &str,
+    direction: WsDirection,
+    rules: &[crate::websocket::WsRewriteRule],
+    ws_dir: crate::websocket::WsRuleDir,
+    mask_out: bool,
+) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    decoder.feed(new_bytes);
+    while let Some(frame) = decoder.next_frame() {
+        // 仅对**完整文本帧**应用改写(分片可能切断 find 串,故只在 FIN=1 文本帧上改);其余原样转发。
+        let payload = if frame.fin && frame.opcode == crate::websocket::OpCode::Text {
+            crate::websocket::rewrite_text(ws_dir, &frame.payload, rules)
+                .unwrap_or_else(|| frame.payload.clone())
+        } else {
+            frame.payload.clone()
+        };
+        let out = crate::websocket::encode_frame(frame.fin, frame.opcode, &payload, mask_out);
+        wr.write_all(&out).await?;
+        wr.flush().await?;
+        // 记录改写后的帧(历史里看到的是改后内容)。
+        let rec = crate::websocket::Frame {
+            fin: frame.fin,
+            opcode: frame.opcode,
+            payload,
+        };
+        if let Some(msg) = assembler.push(rec) {
+            let wm = WsMessage::new(conn_id, host, path, direction, msg.opcode.label(), msg.payload);
+            if let Ok(s) = store.lock() {
+                let _ = s.save_ws(&wm);
+            }
+        }
     }
     Ok(())
 }

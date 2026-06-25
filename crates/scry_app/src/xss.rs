@@ -6,10 +6,11 @@
 //!
 //! ⚠️ 主动注入会向目标发送脚本载荷,**只对你已获授权的目标使用**。
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drission::prelude::ChromiumBrowser;
 use mage_ui::prelude::*;
@@ -30,6 +31,8 @@ use crate::widgets::{divider, section_label};
 const CANDIDATE_CAP: usize = 16;
 /// 测试日志最多保留行数。
 const XSS_LOG_CAP: usize = 600;
+/// 存储型 XSS:重访检查的同站页面数上限。
+const STORED_VIEW_CAP: usize = 40;
 
 // ───────────────────────── 后台 runner ─────────────────────────
 
@@ -123,8 +126,9 @@ fn truncate(s: &str, n: usize) -> String {
 
 /// 整条 XSS 测试流程;全程经 `tx` 流式回传日志 / 发现 / DOM sink / 进度。
 async fn run_xss(
-    base_req: ReplayRequest,
+    mut base_req: ReplayRequest,
     points: Vec<InjectionPoint>,
+    session: Option<crate::session::SessionPlan>,
     upstream: Option<UpstreamProxy>,
     ctrl: Arc<AtomicBool>,
     tx: Sender<XssMsg>,
@@ -133,6 +137,30 @@ async fn run_xss(
         upstream,
         ..Default::default()
     };
+
+    // 会话处理:开扫前跑登录宏建立会话并注入到基准请求(所有探测都会带上)。
+    if let Some(plan) = session {
+        log_line(&tx, SqliLevel::Info, "运行登录宏建立会话…");
+        match crate::session::run_login_macro(&plan).await {
+            Ok((status, st)) => {
+                log_line(
+                    &tx,
+                    if st.is_empty() {
+                        SqliLevel::Warn
+                    } else {
+                        SqliLevel::Good
+                    },
+                    format!("会话已建立(HTTP {status}):{}", st.summary()),
+                );
+                let (h, b) =
+                    crate::session::apply_session_to(&base_req.headers, &base_req.body, &st, &plan.apply);
+                base_req.headers = h;
+                base_req.body = b;
+            }
+            Err(e) => log_line(&tx, SqliLevel::Warn, format!("登录宏失败:{e}")),
+        }
+    }
+
     let base_flow = flow_from_req(&base_req);
 
     // 基线:静态扫一遍 DOM sink(信息性提示)。
@@ -371,6 +399,119 @@ async fn run_xss_dom(
     finish(&tx, format!("完成:浏览器确认 {confirmed} 处真实执行"));
 }
 
+/// 存储型 / 盲打 XSS:对每个注入点提交带**唯一标记**的载荷,然后**重访同站其它页面**,
+/// 若标记载荷在别处被未编码地持久回显 = 确认存储型 XSS(展示触发页 URL)。
+async fn run_xss_stored(
+    base_req: ReplayRequest,
+    points: Vec<InjectionPoint>,
+    view_reqs: Vec<ReplayRequest>,
+    nonce: u32,
+    upstream: Option<UpstreamProxy>,
+    ctrl: Arc<AtomicBool>,
+    tx: Sender<XssMsg>,
+) {
+    let cfg = ReplayConfig {
+        upstream,
+        ..Default::default()
+    };
+    let base_flow = flow_from_req(&base_req);
+
+    // 1) 逐注入点提交带唯一标记的载荷(标记前缀 sCrYs 混合大小写,不会被 HTML 实体编码)。
+    let mut markers: Vec<(String, String)> = Vec::new(); // (marker, point_label)
+    for (i, point) in points.iter().enumerate() {
+        if ctrl.load(Ordering::Relaxed) {
+            finish(&tx, "已停止");
+            return;
+        }
+        let marker = format!("sCrYs{nonce}{i}");
+        let payload = format!("{marker}<svg/onload=alert({EXEC_MARK})>");
+        let probe = build_probe(&base_flow, point, &payload);
+        log_prog(&tx, format!("提交载荷 {}/{}", i + 1, points.len()));
+        match replay::send(&ReplayRequest::from_flow(&probe), &cfg).await {
+            Ok(resp) => {
+                log_line(
+                    &tx,
+                    SqliLevel::Info,
+                    format!("已提交 [{}] 标记 {marker}(HTTP {})", point.label(), resp.status),
+                );
+                markers.push((marker, point.label()));
+            }
+            Err(e) => log_line(&tx, SqliLevel::Bad, format!("[{}] 提交失败:{e}", point.label())),
+        }
+    }
+    if markers.is_empty() {
+        finish(&tx, "完成:无成功提交");
+        return;
+    }
+
+    // 2) 重访同站页面,查标记载荷是否被持久回显(未编码 = 可利用)。
+    log_line(
+        &tx,
+        SqliLevel::Info,
+        format!("重访 {} 个同站页面检查持久回显…", view_reqs.len()),
+    );
+    let mut confirmed = 0usize;
+    let mut seen: HashSet<String> = HashSet::new();
+    for (vi, vr) in view_reqs.iter().enumerate() {
+        if ctrl.load(Ordering::Relaxed) {
+            finish(&tx, "已停止");
+            return;
+        }
+        log_prog(&tx, format!("重访 {}/{}", vi + 1, view_reqs.len()));
+        let Some(body) = replay::send(vr, &cfg).await.ok().map(|f| decode_body(&f)) else {
+            continue;
+        };
+        let view_url = format!("{}://{}{}", vr.scheme, vr.host, vr.path);
+        for (marker, plabel) in &markers {
+            let exploit = format!("{marker}<svg/onload");
+            if body.contains(&exploit) {
+                if !seen.insert(format!("{marker}|{}", vr.path)) {
+                    continue;
+                }
+                confirmed += 1;
+                log_line(
+                    &tx,
+                    SqliLevel::Good,
+                    format!("✓ 存储型 XSS![{plabel}] 载荷在 {view_url} 未编码持久回显"),
+                );
+                push_finding(
+                    &tx,
+                    XssFinding {
+                        point: format!("{plabel} → {view_url}"),
+                        confirmed: true,
+                        context: "Stored XSS",
+                        payload: Some(format!("{marker}<svg/onload=alert({EXEC_MARK})>")),
+                        kind: Some("stored"),
+                    },
+                );
+            } else if body.contains(marker.as_str()) {
+                if !seen.insert(format!("enc|{marker}|{}", vr.path)) {
+                    continue;
+                }
+                log_line(
+                    &tx,
+                    SqliLevel::Warn,
+                    format!("[{plabel}] 标记在 {view_url} 出现但已编码(已存储,不可利用)"),
+                );
+                push_finding(
+                    &tx,
+                    XssFinding {
+                        point: format!("{plabel} → {view_url}"),
+                        confirmed: false,
+                        context: "Stored (encoded)",
+                        payload: None,
+                        kind: None,
+                    },
+                );
+            }
+        }
+    }
+    finish(
+        &tx,
+        format!("完成:确认 {confirmed} 处存储型 XSS · 重访 {} 页", view_reqs.len()),
+    );
+}
+
 // ───────────────────────── UI + 控制 ─────────────────────────
 
 impl ScryApp {
@@ -416,9 +557,10 @@ impl ScryApp {
         cx.notify();
     }
 
-    /// 切换验证模式(0 = 静态反射检测;1 = 浏览器真执行确认)。
+    /// 切换验证模式(0 = 静态反射检测;1 = 浏览器真执行确认;2 = 存储型 / 盲打)。
     pub fn set_xss_mode(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.xss_dom = idx == 1;
+        self.xss_stored = idx == 2;
         cx.notify();
     }
 
@@ -434,6 +576,9 @@ impl ScryApp {
     pub fn start_xss(&mut self, cx: &mut Context<Self>) {
         if self.xss_busy {
             return;
+        }
+        if self.xss_stored {
+            return self.start_xss_stored(cx);
         }
         if self.xss_dom {
             return self.start_xss_dom(cx);
@@ -473,6 +618,7 @@ impl ScryApp {
                 None => all_points.into_iter().take(CANDIDATE_CAP).collect(),
             }
         };
+        let session = self.session_plan(cx);
         let up = self.upstream_proxy(cx);
 
         self.xss_busy = true;
@@ -503,7 +649,131 @@ impl ScryApp {
                     Ok(rt) => rt,
                     Err(_) => return,
                 };
-                rt.block_on(run_xss(base_req, points, up, ctrl, tx));
+                rt.block_on(run_xss(base_req, points, session, up, ctrl, tx));
+            })
+            .detach();
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let keep = this.update(cx, |this, cx| {
+                    this.drain_xss();
+                    cx.notify();
+                    this.xss_busy
+                });
+                match keep {
+                    Ok(true) => continue,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 存储型 / 盲打 XSS:注入唯一标记载荷并提交 → 重访同站(历史里)其它页面看是否持久回显。
+    /// 重访页来自当前抓到的同站 GET 流量 + 目标页本身的 GET 视图。
+    pub fn start_xss_stored(&mut self, cx: &mut Context<Self>) {
+        let target = self.xss_target.read(cx).text().to_string();
+        let raw = self.xss_req.read(cx).text().to_string();
+        let base_req = match parse_raw_request(&target, &raw) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("请求解析失败:{e}");
+                self.xss_log = vec![SqliLine {
+                    level: SqliLevel::Bad,
+                    text: msg.clone(),
+                }];
+                self.xss_progress = Some(msg);
+                cx.notify();
+                return;
+            }
+        };
+        let base_flow = flow_from_req(&base_req);
+        let all_points = injection_points(&base_flow);
+        if all_points.is_empty() {
+            let msg = "无注入点(请求需带查询参数或表单字段)".to_string();
+            self.xss_log = vec![SqliLine {
+                level: SqliLevel::Warn,
+                text: msg.clone(),
+            }];
+            self.xss_progress = Some(msg);
+            cx.notify();
+            return;
+        }
+        let points: Vec<InjectionPoint> = if self.xss_point_sel == 0 {
+            all_points.clone().into_iter().take(CANDIDATE_CAP).collect()
+        } else {
+            match all_points.get(self.xss_point_sel - 1) {
+                Some(p) => vec![p.clone()],
+                None => all_points.clone().into_iter().take(CANDIDATE_CAP).collect(),
+            }
+        };
+
+        // 重访页:目标页 GET 视图 + 同站已抓到的 GET 流量(去重,封顶)。
+        let host = base_req.host.clone();
+        let mut view_reqs: Vec<ReplayRequest> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        if seen.insert(base_req.path.clone()) {
+            view_reqs.push(ReplayRequest {
+                method: "GET".into(),
+                scheme: base_req.scheme.clone(),
+                host: host.clone(),
+                port: base_req.port,
+                path: base_req.path.clone(),
+                headers: base_req.headers.clone(),
+                body: Vec::new(),
+            });
+        }
+        for f in &self.flows {
+            if view_reqs.len() >= STORED_VIEW_CAP {
+                break;
+            }
+            if f.host == host && f.method.eq_ignore_ascii_case("GET") && seen.insert(f.path.clone())
+            {
+                view_reqs.push(ReplayRequest::from_flow(f));
+            }
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(1337);
+        let up = self.upstream_proxy(cx);
+
+        self.xss_busy = true;
+        self.xss_findings.clear();
+        self.xss_sinks.clear();
+        self.xss_log = vec![SqliLine {
+            level: SqliLevel::Info,
+            text: format!(
+                "存储型 XSS 测试开始 · {} 个注入点 · 重访 {} 个同站页面",
+                points.len(),
+                view_reqs.len()
+            ),
+        }];
+        self.xss_progress = Some("准备中…".to_string());
+        let ctrl = Arc::new(AtomicBool::new(false));
+        self.xss_ctrl = Some(ctrl.clone());
+        let (tx, rx) = mpsc::channel::<XssMsg>();
+        self.xss_rx = Some(rx);
+        self.push_log(
+            LogLevel::Info,
+            "xss",
+            format!("存储型 XSS 测试开始 · {host} · {} 注入点", points.len()),
+        );
+        cx.notify();
+
+        cx.background_executor()
+            .spawn(async move {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                rt.block_on(run_xss_stored(base_req, points, view_reqs, nonce, up, ctrl, tx));
             })
             .detach();
 
@@ -733,11 +1003,21 @@ impl ScryApp {
                 view_ps.update(app, |this, cx| this.set_xss_point(i, cx));
             });
 
-        // 验证模式:静态反射 / 浏览器真执行。
+        // 验证模式:静态反射 / 浏览器真执行 / 存储型。
         let view_m = cx.entity();
         let mode_seg = Segmented::new("xss-mode")
-            .items([self.lang.t("Static check"), self.lang.t("Live browser")])
-            .selected(if self.xss_dom { 1 } else { 0 })
+            .items([
+                self.lang.t("Static check"),
+                self.lang.t("Live browser"),
+                self.lang.t("Stored"),
+            ])
+            .selected(if self.xss_stored {
+                2
+            } else if self.xss_dom {
+                1
+            } else {
+                0
+            })
             .on_select(move |i, _e, _w, app| {
                 view_m.update(app, |this, cx| this.set_xss_mode(i, cx));
             });

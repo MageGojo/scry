@@ -115,6 +115,26 @@ pub struct UnionTest {
     pub value: String,
 }
 
+/// 单条联合查询载荷:`cols` 列,把**任意子查询** `inner`(外带标记包裹后)放在第 `pos` 列
+/// (其余列填 `NULL`)。供取标量与 dump 枚举共用。
+pub fn union_inner_value(
+    value: &str,
+    boundary: Boundary,
+    dbms: Dbms,
+    inner: &str,
+    cols: usize,
+    pos: usize,
+) -> String {
+    let p = boundary.prefix;
+    let s = boundary.suffix;
+    let marked = dbms.wrap_scalar(inner);
+    let list = (0..cols)
+        .map(|i| if i == pos { marked.clone() } else { "NULL".to_string() })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{value}{p} UNION SELECT {list}{s}")
+}
+
 /// 单条联合查询载荷:`cols` 列,把外带标量放在第 `pos` 列(其余列填 `NULL`)。
 pub fn union_value(
     value: &str,
@@ -124,14 +144,7 @@ pub fn union_value(
     cols: usize,
     pos: usize,
 ) -> String {
-    let p = boundary.prefix;
-    let s = boundary.suffix;
-    let marked = dbms.wrap_scalar(dbms.scalar(scalar));
-    let list = (0..cols)
-        .map(|i| if i == pos { marked.clone() } else { "NULL".to_string() })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{value}{p} UNION SELECT {list}{s}")
+    union_inner_value(value, boundary, dbms, dbms.scalar(scalar), cols, pos)
 }
 
 /// 为某方言生成联合查询取数载荷:列数 `1..=max_cols`,每个列数下把外带标量轮流放到各列

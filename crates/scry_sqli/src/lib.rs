@@ -18,9 +18,11 @@
 //! - [`payloads`] —— 边界([`Boundary`])+ 四类技术的载荷生成(纯函数,可单测)。
 //! - [`detect`] —— 命中判定([`judge_boolean`] / [`judge_time_delta`] / [`match_error_dbms`])、
 //!   响应相似度([`similarity`])与外带数据解析([`parse_exfil`])。
+//! - [`dump`] —— 盲注逐字符取数原语 + 库 / 表 / 列 / 行枚举查询 + 二分解码器(sqlmap 式 dump)。
 
 pub mod detect;
 pub mod dialect;
+pub mod dump;
 pub mod payloads;
 pub mod points;
 
@@ -29,9 +31,14 @@ pub use detect::{
     RespView, BOOL_SIM_GAP, BOOL_SIM_HIGH,
 };
 pub use dialect::{Dbms, Scalar, TimeInject};
+pub use dump::{
+    bool_inject, cell_query, char_code_expr, column_name_query, columns_count_query, length_expr,
+    rows_count_query, search_byte, search_length, table_name_query, tables_count_query, time_inject,
+};
 pub use payloads::{
-    boolean_tests, error_extract_value, error_probe_values, time_tests, union_tests, union_value,
-    BooleanTest, Boundary, TimeTest, UnionTest, BOUNDARIES, ERROR_PROBES, UNION_MAX_COLS,
+    boolean_tests, error_extract_value, error_probe_values, time_tests, union_inner_value,
+    union_tests, union_value, BooleanTest, Boundary, TimeTest, UnionTest, BOUNDARIES, ERROR_PROBES,
+    UNION_MAX_COLS,
 };
 pub use points::{build_probe, injection_points, InjectionPoint, Location};
 
